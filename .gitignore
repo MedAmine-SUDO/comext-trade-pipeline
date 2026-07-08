@@ -1,0 +1,27 @@
+# Data directory (downloaded files, DuckDB, Parquet)
+data/
+
+# Dagster home
+.dagster/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db

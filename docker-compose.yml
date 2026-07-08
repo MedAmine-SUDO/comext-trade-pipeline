@@ -1,0 +1,49 @@
+# =============================================================================
+# COMEXT Pipeline — Production Compose
+#
+# Usage:
+#   Production:  docker compose -f docker-compose.yml up -d
+#   Development: docker compose up -d          (auto-merges override file)
+# =============================================================================
+
+services:
+  dagster:
+    build:
+      context: .
+      target: prod          # overridden to "dev" in docker-compose.override.yml
+      args:
+        PYTHON_VERSION: "3.11.9"
+        UV_VERSION: "0.4.30"
+    image: comext-pipeline:prod
+    restart: unless-stopped
+    ports:
+      - "${DAGSTER_HOST_PORT:-3000}:3000"
+    env_file:
+      - .env                # create from .env.example; never commit real .env
+    environment:
+      # These can be overridden by .env, but provide safe defaults here too
+      DAGSTER_HOME: /app/.dagster
+      COMEXT_DATA_DIR: /data
+      COMEXT_RAW_DIR: /data/raw
+      COMEXT_PROCESSED_DIR: /data/processed
+      COMEXT_DB_PATH: /data/comext.duckdb
+    volumes:
+      - dagster_home:/app/.dagster   # Dagster run history, event log, schedules
+      - comext_data:/data            # All downloaded + processed data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/server_info"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  dagster_home:
+    driver: local
+  comext_data:
+    driver: local

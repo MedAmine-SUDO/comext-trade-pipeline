@@ -1,0 +1,41 @@
+# =============================================================================
+# COMEXT Pipeline — Development Override
+#
+# Automatically merged by `docker compose up` (no -f flag needed).
+# DO NOT use this file in production.
+#
+# What this adds over the base compose:
+#   - Builds the "dev" Dockerfile target (includes pytest, ruff, mypy)
+#   - Bind-mounts the local source tree for live reload (no rebuild on edits)
+#   - Exposes debugpy on port 5678
+#   - Relaxes restart policy so crashes surface immediately
+#   - Overrides CMD to dagster dev (hot-reload mode)
+# =============================================================================
+
+services:
+  dagster:
+    build:
+      target: dev           # override the prod target
+    image: comext-pipeline:dev
+    restart: "no"           # fail fast in dev; don't hide crashes
+    ports:
+      - "${DAGSTER_HOST_PORT:-3000}:3000"
+      - "5678:5678"         # debugpy / DAP port
+    volumes:
+      # Bind-mount source for live reload. Safe because the venv lives at
+      # /venv-dev (outside /app) and cannot be overwritten by this mount.
+      - .:/app
+      - dagster_home_dev:/app/.dagster
+      - ./data:/data              # bind mount so files appear in ./data/ on the host
+    environment:
+      DAGSTER_DEV: "1"
+    # Install the local package in editable mode before starting Dagster.
+    # This runs on every `docker compose up` but is near-instant after the
+    # first time (uv caches the no-op). Ensures `comext_pipeline` is always
+    # importable from the bind-mounted source tree.
+    command: >
+      /bin/sh -c "uv pip install --no-deps -e . --python /venv-dev/bin/python --quiet && exec dagster dev -m comext_pipeline --host 0.0.0.0 --port 3000"
+
+volumes:
+  dagster_home_dev:
+    driver: local

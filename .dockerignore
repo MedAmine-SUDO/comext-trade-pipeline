@@ -1,0 +1,59 @@
+# =============================================================================
+# .dockerignore — keeps the build context lean and secrets out of the image
+# =============================================================================
+
+# Version control
+.git
+.gitignore
+.github
+
+# Python artefacts
+__pycache__
+*.py[cod]
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+dist
+build
+
+# Virtual environments (never copy into image — uv creates its own)
+.venv
+venv
+env
+
+# Dagster home (runtime state, not source)
+.dagster
+
+# Data directories (mounted as volumes in production)
+data/
+*.duckdb
+*.7z
+*.dat
+
+# Environment files (secrets must not enter the build context)
+.env
+.env.*
+!.env.example
+
+# IDE / editor
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+
+# Test / CI artefacts
+.coverage
+htmlcov
+coverage.xml
+junit.xml
+
+# Docs (not needed at runtime)
+docs/
+
+# Docker files themselves (no need to copy into image)
+Dockerfile
+docker-compose*.yml
+.dockerignore
