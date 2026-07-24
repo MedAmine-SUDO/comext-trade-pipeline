@@ -2,6 +2,8 @@
 
 A production-minded [Dagster](https://dagster.io/) pipeline that discovers, downloads, cleans, and maintains an up-to-date local copy of Eurostat's [COMEXT](https://ec.europa.eu/eurostat/web/international-trade/data/database) international trade data. It supports both full historical backfill and incremental updates with surgical revision detection.
 
+> **Note:** This is a personal portfolio project built to learn asset-based orchestration with Dagster. It's shared publicly for reference and discussion — see [LICENSE](./LICENSE.md) for reuse terms (CC BY-NC-ND: look and learn, please don't redistribute or repurpose commercially). If you'd like to build on it or use it commercially, feel free to reach out.
+
 ---
 
 ## Table of Contents
