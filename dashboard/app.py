@@ -232,7 +232,7 @@ def main() -> None:
     st.caption(
         "What the 27 EU member states buy and sell, month by month. Eurostat COMEXT data, "
         "loaded by a [Dagster pipeline](https://github.com/MedAmine-SUDO/comext-trade-pipeline) "
-        "and aggregated from ~3 million product-level rows per month."
+        "and aggregated from ~5 million product-level rows per month."
     )
 
     # Filters, in one row above everything they affect.
