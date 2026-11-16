@@ -1,5 +1,7 @@
 # COMEXT Trade Flow Pipeline
 
+[![CI](https://github.com/MedAmine-SUDO/comext-trade-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/MedAmine-SUDO/comext-trade-pipeline/actions/workflows/ci.yml)
+
 A production-minded [Dagster](https://dagster.io/) pipeline that discovers, downloads, cleans, and maintains an up-to-date local copy of Eurostat's [COMEXT](https://ec.europa.eu/eurostat/web/international-trade/data/database) international trade data. It supports both full historical backfill and incremental updates with surgical revision detection.
 
 > **Note:** This is a personal portfolio project built to learn asset-based orchestration with Dagster. It's shared publicly for reference and discussion — see [LICENSE](./LICENSE.md) for reuse terms (CC BY-NC-ND: look and learn, please don't redistribute or repurpose commercially). If you'd like to build on it or use it commercially, feel free to reach out.
@@ -70,13 +72,14 @@ The pipeline's entry point. Runs every 30 minutes (configurable) and:
 
 1. Fetches the current Eurostat directory listing
 2. Filters to the last `REVISION_WINDOW_MONTHS` months (default: 24)
-3. For each month, compares the **remote Last-Modified header** against the **stored manifest value**
-4. Yields a `RunRequest` for each changed or newly published month — unchanged months are **skipped entirely**
+3. For each month, compares the **remote Last-Modified header** against the **version actually loaded into DuckDB** (`loaded.json`)
+4. Yields a `RunRequest` for each new, revised or previously failed month that has no run in progress — unchanged months are **skipped entirely**
 5. Attaches tags (`reason: new|revised`, `period`, `remote_last_modified`) for observability
 
 This means:
 - Truly new months → always trigger a run
 - Revised months → trigger only if the source file actually changed
+- Failed months → retried on the next tick, because they never reached `loaded.json`
 - Unchanged months → zero compute, zero bandwidth
 
 #### 2. Partitions: `MONTHLY_PARTITIONS` (`partitions/monthly.py`)
@@ -93,9 +96,9 @@ This is a **non-partitioned** asset — it runs once per sensor tick, not once p
 
 Partitioned by month. For a given period:
 1. Looks up the period in the persisted manifest
-2. Calls `EurostatClient.download_file()` — skips if the file already exists locally
-3. Calls `FileStoreResource.extract_archive()` to decompress the `.7z` → `.dat`
-4. Updates the manifest with the latest metadata
+2. Calls `EurostatClient.download_file()`: reuses the archive on disk only if it is the version the manifest lists (Eurostat publishes revisions under the same filename), otherwise downloads again
+3. Calls `FileStoreResource.extract_archive()` to decompress the `.7z` → `.dat`, replacing any older extract
+4. Updates the manifest and records the downloaded version in `<raw_dir>/<YYYYMM>/source.json`
 
 Output: one or more `.dat` files in `<raw_dir>/<YYYYMM>/`.
 
@@ -161,15 +164,20 @@ Eurostat API                          Local Disk                          DuckDB
 
 ### Revision Detection in Detail
 
-1. On first run, the manifest is empty — every period in the window triggers a run
-2. On subsequent runs, the sensor fetches the live listing and for each period compares:
-   - `stored_manifest[period]["last_modified"]` (from local JSON)
-   - `live_entry.last_modified` (from Eurostat HTTP response)
-3. If they match → **skip** (no change)
-4. If they differ → **queue a run** with tag `reason: revised`
-5. If the period is not in the manifest → **queue a run** with tag `reason: new`
+The pipeline keeps two separate records:
 
-This avoids blindly re-processing all 24 months on every sensor tick.
+- **`manifest.json`**: what Eurostat publishes right now. It is refreshed on every run.
+- **`loaded.json`**: which version of each month is actually in DuckDB. `comext_dataset` writes it only after a successful load.
+
+On each tick, the sensor fetches the live listing and, for each period in the window:
+
+1. If Eurostat hasn't published it yet → skip (counted as "not yet published")
+2. If a run for it is already queued or running → skip (no duplicates)
+3. If `loaded.json` has the same `last_modified` as Eurostat → **skip** (up to date)
+4. If `loaded.json` has an older version → **queue a run** with tag `reason: revised`
+5. If it isn't in `loaded.json` at all (never loaded, or its last run failed) → **queue a run** with tag `reason: new`
+
+Comparing against `loaded.json` instead of the manifest matters: the manifest is refreshed even when a run fails afterwards, so it can't tell "published" from "loaded". This avoids blindly re-processing all 24 months on every tick, without ever losing a failed month.
 
 ---
 
@@ -187,7 +195,7 @@ make dev-d
 
 # 3. The sensor auto-starts. Within 30 seconds it:
 #    - Fetches the Eurostat directory listing
-#    - Compares against the manifest (empty → all months are new)
+#    - Compares against loaded.json (empty → all months are new)
 #    - Submits RunRequests for the last 24 months
 ```
 
@@ -199,7 +207,7 @@ When you materialise partition `2024-01-01` (period `202401`), the following hap
 2. **`raw_comext_files[2024-01-01]`**:
    - Reads `manifest.json`, finds entry for `202401`
    - Calls `EurostatClient.download_file(entry, dest_dir=data/raw/202401/)`
-   - If not already downloaded: streams the `.7z` file to `data/raw/202401/full_v2_202401.7z`
+   - If missing or stale (older Last-Modified): streams the `.7z` file to `data/raw/202401/full_v2_202401.7z`
    - Calls `FileStoreResource.extract_archive(data/raw/202401/full_v2_202401.7z, data/raw/202401/)`
    - Extracts → `data/raw/202401/full_v2_202401.dat`
 3. **`processed_monthly_data[2024-01-01]`**:
@@ -218,14 +226,15 @@ When you materialise partition `2024-01-01` (period `202401`), the following hap
    - Connects to `data/comext.duckdb`
    - Deletes all rows where `period = '202401'`
    - Inserts all rows from the Parquet file
+   - Records `202401` and its source version in `data/raw/loaded.json`
    - Returns total row count after insert
 
 ### Incremental Update (Sensor Tick)
 
 The next sensor tick (30 min later):
 1. Fetches the same Eurostat listing
-2. For each of the last 24 months, compares `last_modified` values
-3. If all match → yields `SkipReason("All N periods in window unchanged ...")` — no runs
+2. For each of the last 24 months, compares Eurostat's `last_modified` with `loaded.json`
+3. If all match → yields `SkipReason("Nothing to run in the 24-month window: N up to date, ...")` — no runs
 4. If Eurostat published a revision (e.g. `202401` data was corrected) → yields `RunRequest(partition_key="2024-01-01", tags={"reason": "revised"})`
 5. If a new month appeared (e.g. now `202406` is available) → yields `RunRequest(partition_key="2024-06-01", tags={"reason": "new"})`
 
@@ -272,7 +281,9 @@ comext_pipeline/
 │       └── parsing.py                 #   Raw COMEXT file parser (Polars)
 │
 ├── scripts/
-│   └── backfill.py                    # CLI helper for historical materialisation
+│   ├── backfill.py                    # CLI helper for historical materialisation
+│   └── entrypoint-prod.sh             # Prod container: webserver + daemon
+├── dagster.yaml                       # Instance settings: pool limits (parse, duckdb)
 │
 ├── tests/
 │   ├── conftest.py                    # Shared fixtures (tmp dir, sample CSV/pipe data)
@@ -280,9 +291,10 @@ comext_pipeline/
 │   │   ├── test_parsing.py            #   Parser tests (CSV, pipe, edge cases)
 │   │   ├── test_schema.py             #   Pydantic model validation tests
 │   │   ├── test_eurostat_client.py    #   HTTP client tests (mocked)
-│   │   ├── test_file_store.py         #   File store tests (extraction, manifest)
+│   │   ├── test_file_store.py         #   File store tests (extraction, manifest, load state)
 │   │   ├── test_duckdb_resource.py    #   DuckDB upsert tests
-│   │   └── test_partitions.py         #   Partition key conversion tests
+│   │   ├── test_partitions.py         #   Partition key conversion tests
+│   │   └── test_sensor.py             #   Sensor: new, revised, failed, in-flight months
 │   └── integration/
 │       └── test_pipeline.py           #   End-to-end with mocked HTTP
 │
@@ -297,6 +309,7 @@ comext_pipeline/
 | `Dockerfile` | Multi-stage image build | `base` (Python 3.11 + `p7zip-full`), `builder` (uv sync of deps), `dev` (+dev deps, source bind-mount), `prod` (source baked in, non-root user) |
 | `docker-compose.yml` | Production orchestration | Single `dagster` service, named volumes for data persistence, health check |
 | `docker-compose.override.yml` | Dev overlay (auto-merged) | `target: dev`, bind-mount source, debugpy port 5678, `dagster dev` hot-reload |
+| `dagster.yaml` | Dagster instance settings | Pool limits: one parse and one DuckDB write at a time; copied into `$DAGSTER_HOME` at start |
 | `pyproject.toml` | Project config | setuptools build, uv dev-deps, ruff/mypy/pytest configuration |
 | `Makefile` | Convenience wrappers | All `make` commands wrap `docker compose` |
 
@@ -413,30 +426,31 @@ docker compose down -v       # !! also removes volumes (deletes all data)
 ## Quick Start (Local, No Docker)
 
 ```bash
-# 1. Clone / unzip the repository
-cd comext_pipeline
+# 1. Clone the repository
+git clone https://github.com/MedAmine-SUDO/comext-trade-pipeline.git
+cd comext-trade-pipeline
 
 # 2. Prepare environment
 cp .env.example .env
 
-# 3. Create and activate a virtual environment
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+# 3. Install the package and dev dependencies (uv creates .venv)
+uv sync
 
-# 4. Install the package with dev dependencies
-pip install -e ".[dev]"
+# 4. Set up the Dagster home with the concurrency limits
+export DAGSTER_HOME="$PWD/.dagster"
+mkdir -p "$DAGSTER_HOME" && cp dagster.yaml "$DAGSTER_HOME/"
 
 # 5. Verify
-dagster definitions validate -m comext_pipeline
+uv run dagster definitions validate -m comext_pipeline
 
 # 6. Run tests
-pytest
+uv run pytest
 
 # 7. Start the Dagster dev server
-dagster dev -m comext_pipeline --host 0.0.0.0 --port 3000
+uv run dagster dev -m comext_pipeline --host 0.0.0.0 --port 3000
 ```
 
-> Requires Python 3.11+ and the `7z` CLI installed on your system PATH.
+> Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/). `dagster.yaml` limits parsing and DuckDB writes to one month at a time, which keeps memory bounded: a recent month is about 400 MB uncompressed.
 
 ---
 
@@ -529,7 +543,7 @@ make prod-logs
 make prod-down
 ```
 
-Production uses `dagster-webserver` instead of `dagster dev` — no hot-reload, no sensor auto-start, minimal attack surface.
+Production runs `dagster-webserver` and `dagster-daemon` side by side (`scripts/entrypoint-prod.sh`) instead of `dagster dev`: no hot-reload, no dev tools, non-root user. The daemon is what runs the sensor and the run queue, so new and revised months keep arriving. If either process exits, the container exits and Docker's restart policy brings it back.
 
 ---
 
@@ -668,9 +682,10 @@ tests/
 │   ├── test_parsing.py      # Parser: CSV, pipe-delimited, edge cases, missing columns
 │   ├── test_schema.py       # Pydantic: valid models, invalid data, field validators
 │   ├── test_eurostat_client.py  # HTTP: JSON/HTML listing, download, retry, circuit breaker
-│   ├── test_file_store.py   # File: manifest save/load, archive extraction, path helpers
+│   ├── test_file_store.py   # File: manifest and load state, archive extraction, path helpers
 │   ├── test_duckdb_resource.py  # DuckDB: upsert, connect with lock retry, schema init
-│   └── test_partitions.py   # Partitions: key conversion, latest_n, edge cases
+│   ├── test_partitions.py   # Partitions: key conversion, latest_n, edge cases
+│   └── test_sensor.py       # Sensor: what is queued vs skipped, failed-run retry, no duplicates
 └── integration/
     └── test_pipeline.py     # End-to-end: full asset materialisation with mocked HTTP
 ```
@@ -858,13 +873,13 @@ For a detailed reference on the COMEXT data format, column variations, country c
 | **Intermediate format** | Partitioned Parquet | One file per month → re-running one month only reprocesses that month |
 | **Upsert strategy** | `DELETE WHERE period=X` + `INSERT` | Simpler and faster than true upsert for partitioned data |
 | **Idempotency** | Partition-based + INSERT OR REPLACE | Re-running produces identical results; no duplicate rows |
-| **Revision detection** | `Last-Modified` header comparison | Avoids blindly re-downloading all 24 months on every tick |
+| **Revision detection** | `Last-Modified` compared with what is loaded (`loaded.json`), not with the listing | Avoids re-downloading all 24 months on every tick, and a failed month is retried instead of being marked done |
 | **Format resilience** | Column-name alias resolution | Handles both v2 CSV and older pipe-delimited formats with different column names |
 | **Deployment** | Docker (multi-stage) | Identical behaviour on Windows/macOS/Linux; no host tooling needed |
 | **Schema enforcement** | Pydantic models + DuckDB DDL | Double validation: Python-side at parse time, database-side at write time |
 | **Error tolerance** | Configurable validation threshold | Can warn on errors (development) or fail (production) |
 | **Circuit breaker** | In-memory failure counter | Protects Eurostat API from aggressive retries when it's down |
-| **Concurrency control** | `dagster/concurrency_key` | Ensures only one partition writes to DuckDB at a time (avoids lock contention) |
+| **Concurrency control** | Dagster pools (`parse`, `duckdb`) limited to 1 in `dagster.yaml` | Downloads run in parallel, but only one month is parsed at a time (bounded memory) and DuckDB has a single writer (no lock contention) |
 
 ### Why not...
 
