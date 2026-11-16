@@ -68,14 +68,30 @@ def raw_comext_files(
 
     dest_dir = file_store.raw_period_dir(period)
 
+    # Eurostat publishes revisions under the same filename, so an archive on disk
+    # is only reusable if it is the version the manifest currently lists.
+    # An archive without a recorded version is treated as stale.
+    on_disk = file_store.read_source_last_modified(period)
+    stale = on_disk != entry.last_modified
+    if stale and (dest_dir / entry.filename).exists():
+        context.log.info(
+            "Archive for %s is stale (on disk: %s, upstream: %s) — re-downloading",
+            period,
+            on_disk,
+            entry.last_modified,
+        )
+
     archive_path, was_downloaded = eurostat_client.download_file(
         entry=entry,
         dest_dir=dest_dir,
+        force=stale,
     )
 
     # ── Extract archive ────────────────────────────────────────────────────────
     extracted: list[Path] = []
     if was_downloaded or not any(dest_dir.glob("*.dat")):
+        for old in dest_dir.glob("*.dat"):  # don't mix old and revised extracts
+            old.unlink()
         extracted = file_store.extract_archive(archive_path, dest_dir)
         context.log.info("Extracted: %s", [p.name for p in extracted])
     else:
@@ -90,6 +106,7 @@ def raw_comext_files(
         last_modified=entry.last_modified,
         size_bytes=archive_path.stat().st_size if archive_path.exists() else 0,
     )
+    file_store.write_source_last_modified(period, entry.last_modified)
 
     dat_files = list(dest_dir.glob("*.dat"))
 

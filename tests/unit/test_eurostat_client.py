@@ -262,3 +262,23 @@ class TestDownloadFile:
         dest_path, was_downloaded = client.download_file(entry, tmp_path)
         assert was_downloaded
         assert dest_path.read_bytes() == b"new data"
+
+    def test_force_redownloads_existing_file(self, client: EurostatClient, mocker, tmp_path: Path):
+        """A revised file keeps its filename, so the caller forces a fresh download."""
+        entry = ComextFileEntry(
+            filename="test.7z",
+            url="https://example.com/test.7z",
+            size_bytes=100,
+            last_modified="2026-02-10T09:00:00",
+            period="202401",
+        )
+        (tmp_path / "test.7z").write_bytes(b"old version")
+        mock_stream = mocker.patch("httpx.Client.stream")
+        mock_stream.return_value.__enter__.return_value = httpx.Response(
+            200, content=b"revised version",
+            request=httpx.Request("GET", "https://example.com/"),
+        )
+
+        dest_path, was_downloaded = client.download_file(entry, tmp_path, force=True)
+        assert was_downloaded
+        assert dest_path.read_bytes() == b"revised version"

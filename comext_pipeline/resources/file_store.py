@@ -4,7 +4,8 @@ Local file-system abstraction for raw downloads and processed Parquet outputs.
 Provides:
 - Deterministic path resolution for every period
 - 7z extraction via py7zr (pure Python) with fallback to system `7z`
-- Manifest persistence (JSON) for tracking downloaded files between runs
+- Manifest persistence (JSON): what Eurostat currently publishes
+- Load state (JSON): which version of each period is actually in DuckDB
 - Retention policy: purge raw directories older than N months
 """
 
@@ -22,6 +23,8 @@ from pydantic import Field
 logger = get_dagster_logger(__name__)
 
 _MANIFEST_FILENAME = "manifest.json"
+_LOADED_FILENAME = "loaded.json"
+_SOURCE_FILENAME = "source.json"
 
 
 class FileStoreResource(ConfigurableResource):
@@ -114,11 +117,7 @@ class FileStoreResource(ConfigurableResource):
 
     def save_manifest(self, manifest: dict[str, dict[str, Any]]) -> None:
         """Persist the full manifest dict to disk as JSON (atomic write via .tmp)."""
-        mp = self._manifest_path()
-        tmp = mp.with_suffix(".tmp")
-        with open(tmp, "w") as f:
-            json.dump(manifest, f, indent=2, sort_keys=True)
-        tmp.rename(mp)
+        _write_json(self._manifest_path(), manifest)
         logger.debug("Manifest saved: %d entries", len(manifest))
 
     def update_manifest_entry(
@@ -143,6 +142,43 @@ class FileStoreResource(ConfigurableResource):
         """Return the stored Last-Modified value for *period*, or None."""
         manifest = self.load_manifest()
         return manifest.get(period, {}).get("last_modified")
+
+    # ── Load state ───────────────────────────────────────────────────────
+    #
+    # The manifest says what Eurostat publishes; it is refreshed on every run.
+    # These records say what this pipeline has actually downloaded and loaded,
+    # so a failed run or a revised file is never mistaken for "up to date".
+
+    def _loaded_path(self) -> Path:
+        p = Path(self.raw_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        return p / _LOADED_FILENAME
+
+    def load_loaded_periods(self) -> dict[str, dict[str, Any]]:
+        """Return period → {"last_modified"} for every period loaded into DuckDB."""
+        lp = self._loaded_path()
+        if not lp.exists():
+            return {}
+        with open(lp) as f:
+            return cast(dict[str, dict[str, Any]], json.load(f))
+
+    def mark_period_loaded(self, period: str, last_modified: str) -> None:
+        """Record that the file version *last_modified* of *period* is now in DuckDB."""
+        loaded = self.load_loaded_periods()
+        loaded[period] = {"last_modified": last_modified}
+        _write_json(self._loaded_path(), loaded)
+
+    def read_source_last_modified(self, period: str) -> str | None:
+        """Return the Last-Modified of the archive currently on disk for *period*, or None."""
+        sp = self.raw_period_dir(period) / _SOURCE_FILENAME
+        if not sp.exists():
+            return None
+        with open(sp) as f:
+            return cast(str | None, json.load(f).get("last_modified"))
+
+    def write_source_last_modified(self, period: str, last_modified: str) -> None:
+        """Record the Last-Modified of the archive just downloaded for *period*."""
+        _write_json(self.raw_period_dir(period) / _SOURCE_FILENAME, {"last_modified": last_modified})
 
     # ── Retention ────────────────────────────────────────────────────────
 
@@ -188,3 +224,12 @@ class FileStoreResource(ConfigurableResource):
         else:
             logger.debug("Retention: no periods older than %d month(s) found", older_than_months)
         return removed
+
+
+def _write_json(path: Path, data: dict[str, Any]) -> None:
+    """Write *data* as JSON atomically (via a .tmp file and rename)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+    tmp.rename(path)

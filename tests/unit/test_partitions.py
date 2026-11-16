@@ -44,7 +44,11 @@ class TestPartitionHelpers:
         ) as mock_date:
             mock_date.today.return_value = date(2026, 6, 15)
             keys = latest_n_partition_keys(3)
-            assert keys == ["2026-04-01", "2026-05-01", "2026-06-01"]
+            assert keys == ["2026-03-01", "2026-04-01", "2026-05-01"]
+
+    def test_latest_n_partition_keys_are_valid_partitions(self):
+        valid = set(MONTHLY_PARTITIONS.get_partition_keys())
+        assert set(latest_n_partition_keys(3)) <= valid
 
     def test_latest_n_partition_keys_reversed(self):
         keys = latest_n_partition_keys(3)

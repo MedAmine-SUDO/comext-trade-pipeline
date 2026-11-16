@@ -38,8 +38,11 @@ def period_to_partition_key(period: str) -> str:
 
 def latest_n_partition_keys(n: int) -> list[str]:
     """
-    Return the Dagster partition keys for the most recent ``n`` months
+    Return the Dagster partition keys for the most recent ``n`` complete months
     in ascending chronological order (oldest first).
+
+    The current month is excluded: MONTHLY_PARTITIONS only ends at the last
+    complete month, and Eurostat never publishes a month while it is running.
 
     Used by the sensor to determine the rolling revision window.
     Returns an empty list if ``n`` is zero or negative.
@@ -50,7 +53,7 @@ def latest_n_partition_keys(n: int) -> list[str]:
     today = date.today()
     keys: list[str] = []
 
-    current = date(today.year, today.month, 1)
+    current = (date(today.year, today.month, 1) - timedelta(days=1)).replace(day=1)
     for _ in range(n):
         keys.append(current.strftime("%Y-%m-%d"))
         # Step back one month: subtract a day then reset to the 1st

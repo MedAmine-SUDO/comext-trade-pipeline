@@ -7,12 +7,14 @@ runs for any months that need to be (re-)processed.
 Strategy:
 1. Always check the latest REVISION_WINDOW_MONTHS months (default: 24)
 2. For each period in the window, compare the remote Last-Modified header
-   against the value stored in the local manifest (bonus revision detection)
-3. Submit a partition run only for periods whose file has changed
+   against the version actually loaded into DuckDB (bonus revision detection)
+3. Submit a partition run only for periods that are new, revised, or whose
+   last run failed, and that don't already have a run in progress
 
 This means:
 - Truly new months → always trigger
 - Revised months → trigger only if the source file actually changed
+- Failed months → retried on the next tick
 - Unchanged months → skip (no wasted compute or bandwidth)
 
 The sensor runs every SENSOR_MINIMUM_INTERVAL_SECONDS (default: 30 min).
@@ -22,8 +24,10 @@ from collections.abc import Generator
 
 from dagster import (
     AssetSelection,
+    DagsterRunStatus,
     DefaultSensorStatus,
     RunRequest,
+    RunsFilter,
     SensorEvaluationContext,
     SkipReason,
     define_asset_job,
@@ -81,8 +85,8 @@ def new_release_sensor(
     The sensor:
     1. Fetches the live Eurostat file listing
     2. Restricts to the last REVISION_WINDOW_MONTHS months
-    3. For each, compares remote Last-Modified against stored manifest
-    4. Yields RunRequest for each changed / new period
+    3. For each, compares remote Last-Modified against the loaded version
+    4. Yields RunRequest for each new / revised / failed period not already running
     5. Purges stale raw directories per retention policy
     """
     window = settings.revision_window_months
@@ -102,11 +106,26 @@ def new_release_sensor(
 
     live_by_period = {e.period: e for e in live_entries}
 
-    # Load our stored manifest for comparison
-    stored_manifest = file_store.load_manifest()
+    # Compare against what is actually in DuckDB, not against the manifest:
+    # the manifest is refreshed on every run, even when that run later fails.
+    loaded = file_store.load_loaded_periods()
+
+    # Periods with a queued or running job are left alone to avoid duplicates.
+    active_runs = context.instance.get_runs(
+        filters=RunsFilter(
+            job_name=monthly_ingest_job.name,
+            statuses=[
+                DagsterRunStatus.QUEUED,
+                DagsterRunStatus.NOT_STARTED,
+                DagsterRunStatus.STARTING,
+                DagsterRunStatus.STARTED,
+            ],
+        )
+    )
+    in_flight = {run.tags.get("period") for run in active_runs}
 
     run_requests: list[RunRequest] = []
-    unchanged_count = 0
+    unchanged_count = unpublished_count = running_count = 0
 
     for period, partition_key in window_periods.items():
         live_entry = live_by_period.get(period)
@@ -114,9 +133,15 @@ def new_release_sensor(
         if live_entry is None:
             # Period not yet published by Eurostat — skip
             context.log.debug("Period %s not yet available upstream", period)
+            unpublished_count += 1
             continue
 
-        stored_lm = stored_manifest.get(period, {}).get("last_modified", "")
+        if period in in_flight:
+            context.log.debug("Period %s already has a run in progress", period)
+            running_count += 1
+            continue
+
+        stored_lm = loaded.get(period, {}).get("last_modified", "")
         remote_lm = live_entry.last_modified
 
         # Bonus: compare Last-Modified — only trigger if the file actually changed
@@ -130,7 +155,8 @@ def new_release_sensor(
 
         run_requests.append(
             RunRequest(
-                run_key=f"{partition_key}_{remote_lm or 'unknown'}",
+                # No run_key: a failed period must be re-requested on a later tick,
+                # and in-flight runs are already filtered out above.
                 partition_key=partition_key,
                 tags={
                     "reason": reason,
@@ -142,8 +168,9 @@ def new_release_sensor(
 
     if not run_requests:
         msg = (
-            f"All {len(window_periods)} periods in window unchanged "
-            f"({unchanged_count} verified via Last-Modified)"
+            f"Nothing to run in the {len(window_periods)}-month window: "
+            f"{unchanged_count} up to date, {unpublished_count} not yet published, "
+            f"{running_count} already running"
         )
         context.log.info(msg)
         yield SkipReason(msg)

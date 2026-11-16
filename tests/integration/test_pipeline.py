@@ -236,6 +236,51 @@ class TestFullPipeline:
         assert md["was_downloaded"].value is True
         assert md["period"].value == "202401"
 
+    def test_raw_files_redownloads_revised_archive(self, mocker, resources, tmp_path):
+        """An archive on disk from an older Last-Modified must be replaced, and its
+        old .dat extract removed, so revisions actually reach the dataset."""
+        import py7zr
+
+        new_dat = tmp_path / "trade_202401_rev.dat"
+        new_dat.write_text("PERIOD,REPORTER,PARTNER,PRODUCT_NC,FLOW,STAT_PROCEDURE,VALUE_EUR\n")
+        archive_file = tmp_path / "full_v2_202401.7z"
+        with py7zr.SevenZipFile(archive_file, "w") as z:
+            z.write(new_dat, "trade_202401_rev.dat")
+
+        file_store = resources["file_store"]
+        raw_dir = file_store.raw_period_dir("202401")
+        (raw_dir / "full_v2_202401.7z").write_bytes(b"old archive")
+        (raw_dir / "trade_202401_old.dat").write_text("old extract")
+        file_store.write_source_last_modified("202401", "2025-12-01T00:00:00")
+
+        mocker.patch(
+            "httpx.Client.get",
+            return_value=httpx.Response(
+                200,
+                json=SAMPLE_JSON,
+                headers={"Content-Type": "application/json"},
+                request=httpx.Request("GET", "https://example.com/"),
+            ),
+        )
+        mock_stream = mocker.patch("httpx.Client.stream")
+        mock_stream.return_value.__enter__.return_value = httpx.Response(
+            200,
+            content=archive_file.read_bytes(),
+            request=httpx.Request("GET", "https://example.com/down?file=full_v2_202401.7z"),
+        )
+
+        result = materialize_to_memory(
+            assets=[manifest.comext_file_manifest, raw_files.raw_comext_files],
+            resources=resources,
+            partition_key="2024-01-01",
+            instance=DagsterInstance.ephemeral(),
+        )
+        assert result.success
+        md = result.asset_materializations_for_node("raw_comext_files")[0].metadata
+        assert md["was_downloaded"].value is True
+        assert [p.name for p in raw_dir.glob("*.dat")] == ["trade_202401_rev.dat"]
+        assert file_store.read_source_last_modified("202401") == "2026-01-06T13:54:24"
+
     def test_processed_monthly_data_fails_on_empty_dataframe(self, mocker, resources, tmp_path):
         """A .dat file with headers but no data rows should produce a Failure."""
         period = "202401"
@@ -265,3 +310,29 @@ class TestFullPipeline:
         md = result.asset_materializations_for_node("processed_monthly_data")[0].metadata
         assert md["status"].value == "skipped — no source files"
         assert md["row_count"].value == 0
+
+    def test_dataset_load_records_loaded_version(self, resources):
+        """After a successful load, the period is recorded with the version on disk,
+        which is what the sensor compares against."""
+        file_store = resources["file_store"]
+        raw_dir = file_store.raw_period_dir("202401")
+        (raw_dir / "full_202401.dat").write_text(
+            "REPORTER,PARTNER,TRADE_TYPE,PRODUCT_NC,FLOW,STAT_PROCEDURE,SUPPL_UNIT,PERIOD,"
+            "VALUE_EUR,VALUE_NAC,QUANTITY_KG,QUANTITY_SUPPL_UNIT\n"
+            "AT,AD,E,27101999,2,1,NO_SU,202401,62,62,8,0\n"
+            "FR,US,E,30049000,2,1,NO_SU,202401,567,567,0,0\n"
+        )
+        file_store.write_source_last_modified("202401", "2026-01-06T13:54:24")
+
+        result = materialize_to_memory(
+            assets=[monthly_data.processed_monthly_data, dataset.comext_dataset],
+            resources=resources,
+            partition_key="2024-01-01",
+            instance=DagsterInstance.ephemeral(),
+        )
+        assert result.success
+        assert file_store.load_loaded_periods() == {
+            "202401": {"last_modified": "2026-01-06T13:54:24"}
+        }
+        md = result.asset_materializations_for_node("comext_dataset")[0].metadata
+        assert md["total_rows"].value == 2

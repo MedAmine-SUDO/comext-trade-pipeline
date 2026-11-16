@@ -55,6 +55,10 @@ def comext_dataset(
     # ── Upsert single parquet file ────────────────────────────────────────────
     total_rows = duckdb_resource.upsert_parquet(str(processed_path))
 
+    # Only now is this file version really in the dataset; the sensor relies on it.
+    loaded_version = file_store.read_source_last_modified(period) or ""
+    file_store.mark_period_loaded(period, loaded_version)
+
     # ── Post-load statistics ──────────────────────────────────────────────────
     available_periods = duckdb_resource.get_available_periods()
 
@@ -75,5 +79,6 @@ def comext_dataset(
             ),
             "latest_period": MetadataValue.text(available_periods[-1] if available_periods else ""),
             "parquet_file": MetadataValue.path(str(processed_path)),
+            "source_last_modified": MetadataValue.text(loaded_version),
         }
     )

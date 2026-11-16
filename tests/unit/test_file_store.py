@@ -96,6 +96,28 @@ class TestManifest:
             assert json.load(f) == {"a": {"b": 1}}
 
 
+class TestLoadState:
+    def test_no_periods_loaded_initially(self, store: FileStoreResource):
+        assert store.load_loaded_periods() == {}
+
+    def test_mark_period_loaded(self, store: FileStoreResource):
+        store.mark_period_loaded("202401", "2026-01-06T13:54:24")
+        store.mark_period_loaded("202402", "2026-02-06T10:00:00")
+        assert store.load_loaded_periods() == {
+            "202401": {"last_modified": "2026-01-06T13:54:24"},
+            "202402": {"last_modified": "2026-02-06T10:00:00"},
+        }
+
+    def test_load_state_is_independent_of_manifest(self, store: FileStoreResource):
+        store.save_manifest({"202401": {"last_modified": "2026-01-06T13:54:24"}})
+        assert store.load_loaded_periods() == {}
+
+    def test_source_last_modified_round_trip(self, store: FileStoreResource):
+        assert store.read_source_last_modified("202401") is None
+        store.write_source_last_modified("202401", "2026-01-06T13:54:24")
+        assert store.read_source_last_modified("202401") == "2026-01-06T13:54:24"
+
+
 class TestExtraction:
     def test_extract_archive_with_py7zr(self, store: FileStoreResource, tmp_path: Path):
         import py7zr

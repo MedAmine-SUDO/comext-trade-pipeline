@@ -223,13 +223,19 @@ class EurostatClient(ConfigurableResource):
         self,
         entry: ComextFileEntry,
         dest_dir: Path,
+        force: bool = False,
     ) -> tuple[Path, bool]:
-        """Download a single .7z file to *dest_dir* if not already present. Returns (path, was_downloaded)."""
+        """
+        Download a single .7z file to *dest_dir*. Returns (path, was_downloaded).
+
+        An existing file is reused unless *force* is set, which the caller does
+        when Eurostat has published a revised version under the same filename.
+        """
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_path = dest_dir / entry.filename
         already_exists = dest_path.exists()
 
-        if already_exists:
+        if already_exists and not force:
             logger.info(
                 "File %s already exists at %s — skipping download", entry.filename, dest_path
             )
