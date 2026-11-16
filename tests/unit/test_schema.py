@@ -173,7 +173,7 @@ class TestGetSettings:
         schema_mod._settings = None
         
         s = get_settings()
-        assert s.comext_data_dir == "/data"
+        assert s.comext_data_dir == "./data"
         assert s.eurostat_request_delay >= 0
         assert s.revision_window_months >= 1
 

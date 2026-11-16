@@ -466,7 +466,7 @@ dependencies = [
     { name = "structlog" },
 ]
 
-[package.optional-dependencies]
+[package.dev-dependencies]
 dev = [
     { name = "dagster-webserver" },
     { name = "mypy" },
@@ -481,26 +481,29 @@ dev = [
 requires-dist = [
     { name = "dagster", specifier = ">=1.7.0" },
     { name = "dagster-webserver", specifier = ">=1.7.0" },
-    { name = "dagster-webserver", marker = "extra == 'dev'" },
     { name = "duckdb", specifier = ">=0.10.0" },
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.9.0" },
     { name = "polars", specifier = ">=0.20.0" },
     { name = "py7zr", specifier = ">=0.21.0" },
     { name = "pyarrow", specifier = ">=15.0.0" },
     { name = "pydantic", specifier = ">=2.6.0" },
     { name = "pydantic-settings", specifier = ">=2.2.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0.0" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.12.0" },
     { name = "python-dateutil", specifier = ">=2.9.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "rich", specifier = ">=13.0.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
     { name = "structlog", specifier = ">=24.1.0" },
-    { name = "types-python-dateutil", marker = "extra == 'dev'" },
 ]
-provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "dagster-webserver" },
+    { name = "mypy", specifier = ">=1.9.0" },
+    { name = "pytest", specifier = ">=8.0.0" },
+    { name = "pytest-cov", specifier = ">=5.0.0" },
+    { name = "pytest-mock", specifier = ">=3.12.0" },
+    { name = "ruff", specifier = ">=0.4.0" },
+    { name = "types-python-dateutil" },
+]
 
 [[package]]
 name = "coverage"
