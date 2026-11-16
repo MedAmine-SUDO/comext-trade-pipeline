@@ -8,8 +8,33 @@ A production-minded [Dagster](https://dagster.io/) pipeline that discovers, down
 
 ---
 
+## Dashboard: EU trade explorer
+
+![EU trade explorer](docs/dashboard.png)
+
+A one-page [Streamlit](https://streamlit.io/) app (`dashboard/app.py`) on top of the pipeline's output: EU exports and imports per month, top partners, top product chapters and a trade-balance map, for the EU as a whole or any single member state.
+
+```bash
+uv run --group dashboard streamlit run dashboard/app.py
+```
+
+The app does not query the multi-GB DuckDB file. It reads a small aggregated extract committed in `dashboard/extract/` (monthly totals by partner and by CN chapter, about 1 MB), so it also runs on Streamlit Community Cloud with only `dashboard/requirements.txt`. To refresh the extract after a pipeline run:
+
+```bash
+uv run --group dashboard python scripts/build_dashboard_extract.py              # from DuckDB
+uv run --group dashboard python scripts/build_dashboard_extract.py --from-parquet  # while a run holds the DuckDB lock
+```
+
+Two things the data taught the dashboard:
+
+- **Product rows include a `TOTAL` line per partner** that repeats the sum of the CN8 rows. The extract keeps CN8 rows only, otherwise every figure doubles.
+- **Intra-EU trade arrives late.** In the newest monthly file, all 27 member states have reported trade with the rest of the world, but only some have reported trade with each other. The dashboard defaults to extra-EU trade and warns when an intra-EU month is still incomplete.
+
+---
+
 ## Table of Contents
 
+- [Dashboard: EU trade explorer](#dashboard-eu-trade-explorer)
 - [Overview & Architecture](#overview--architecture)
 - [Pipeline Walkthrough (End-to-End)](#pipeline-walkthrough-end-to-end)
 - [Project Structure](#project-structure)
@@ -282,7 +307,14 @@ comext_pipeline/
 │
 ├── scripts/
 │   ├── backfill.py                    # CLI helper for historical materialisation
+│   ├── build_dashboard_extract.py     # Aggregates DuckDB → dashboard/extract/
 │   └── entrypoint-prod.sh             # Prod container: webserver + daemon
+│
+├── dashboard/
+│   ├── app.py                         # Streamlit "EU trade explorer"
+│   ├── requirements.txt               # Streamlit Cloud dependencies (app only)
+│   └── extract/                       # Committed aggregates + code lists (~1 MB)
+├── .streamlit/config.toml             # Dashboard theme (light and dark)
 ├── dagster.yaml                       # Instance settings: pool limits (parse, duckdb)
 │
 ├── tests/
@@ -299,7 +331,8 @@ comext_pipeline/
 │       └── test_pipeline.py           #   End-to-end with mocked HTTP
 │
 └── docs/
-    └── comext_data_format.md          # COMEXT data format reference
+    ├── comext_data_format.md          # COMEXT data format reference
+    └── dashboard.png                  # Dashboard screenshot
 ```
 
 ### Root Configuration Files

@@ -66,6 +66,11 @@ include = ["comext_pipeline*", "scripts*"]
 #                     make lock-upgrade  (upgrades to latest compatible)
 # -----------------------------------------------------------------------------
 [dependency-groups]
+dashboard = [
+    "plotly>=5.24",
+    "pycountry>=24.6",
+    "streamlit>=1.40",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",

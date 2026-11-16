@@ -1,0 +1,6 @@
+# Streamlit Community Cloud installs this file (it sits next to app.py), so the
+# deployed dashboard needs none of the pipeline's dependencies.
+streamlit>=1.50
+plotly>=5.24
+pandas>=2.2
+pyarrow>=15.0

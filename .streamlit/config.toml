@@ -1,0 +1,16 @@
+# Streamlit theme for dashboard/app.py (Streamlit Cloud reads this from the repo root).
+# Separate light and dark sections keep the viewer's own light/dark choice.
+[theme]
+font = "sans-serif"
+
+[theme.light]
+primaryColor = "#2a78d6"
+
+[theme.dark]
+primaryColor = "#3987e5"
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "viewer"
