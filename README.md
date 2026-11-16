@@ -11,6 +11,8 @@ cleans ~5 million product-level rows a month into DuckDB, and picks up new and r
 
 <br/>
 
+[![Open the dashboard](https://img.shields.io/badge/Open_the_dashboard-→-111827?style=for-the-badge&logo=streamlit&logoColor=FF4B4B)](https://eu-trade-explorer.streamlit.app/)
+&nbsp;
 [![CI](https://img.shields.io/github/actions/workflow/status/MedAmine-SUDO/comext-trade-pipeline/ci.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/MedAmine-SUDO/comext-trade-pipeline/actions/workflows/ci.yml)
 &nbsp;
 [![License](https://img.shields.io/badge/license-CC_BY--NC--ND_4.0-111827?style=for-the-badge)](LICENSE.md)
@@ -24,7 +26,7 @@ cleans ~5 million product-level rows a month into DuckDB, and picks up new and r
 
 <br/>
 
-<img src="docs/dashboard.png" alt="EU trade explorer dashboard built on the pipeline's output" width="100%" />
+<a href="https://eu-trade-explorer.streamlit.app/"><img src="docs/dashboard.png" alt="EU trade explorer dashboard built on the pipeline's output" width="100%" /></a>
 
 </div>
 
@@ -210,6 +212,8 @@ Runs carry tags (`reason: new|revised`, `period`, `remote_last_modified`), so th
 <br/>
 
 ## 📊 Dashboard: EU trade explorer
+
+**Live: [eu-trade-explorer.streamlit.app](https://eu-trade-explorer.streamlit.app/)**
 
 A one-page [Streamlit](https://streamlit.io/) app (`dashboard/app.py`): exports and imports per month, the top 10 partners and product chapters, and a map of the trade balance with each partner. You can look at the EU27 or any single member state, and at extra-EU, intra-EU or all trade.
 
