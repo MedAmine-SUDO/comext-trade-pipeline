@@ -1,0 +1,9 @@
+# Dagster instance settings. Copied into $DAGSTER_HOME at container start;
+# for a local `dagster dev`, copy it there yourself (see README).
+#
+# Every pool runs one step at a time: `parse` keeps memory bounded (one month
+# in Polars at a time) and `duckdb` gives the database a single writer.
+# Downloads have no pool, so they still run in parallel.
+concurrency:
+  pools:
+    default_limit: 1

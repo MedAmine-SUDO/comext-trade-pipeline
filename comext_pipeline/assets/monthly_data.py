@@ -27,6 +27,7 @@ from comext_pipeline.utils.schema import get_settings
         "Re-running replaces the previous output (idempotent)."
     ),
     compute_kind="polars",
+    op_tags={"dagster/concurrency_key": "parse"},
 )
 def processed_monthly_data(
     context: AssetExecutionContext,

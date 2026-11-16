@@ -59,7 +59,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    UV_PROJECT_ENVIRONMENT=/venv-dev uv sync --frozen --no-install-project --extra dev
+    UV_PROJECT_ENVIRONMENT=/venv-dev uv sync --frozen --no-install-project
 
 # =============================================================================
 # STAGE: dev
@@ -125,4 +125,4 @@ USER comext
 
 EXPOSE 3000
 
-CMD ["dagster-webserver", "-m", "comext_pipeline", "--host", "0.0.0.0", "--port", "3000"]
+CMD ["/app/scripts/entrypoint-prod.sh"]

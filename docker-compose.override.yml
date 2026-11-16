@@ -34,7 +34,7 @@ services:
     # first time (uv caches the no-op). Ensures `comext_pipeline` is always
     # importable from the bind-mounted source tree.
     command: >
-      /bin/sh -c "uv pip install --no-deps -e . --python /venv-dev/bin/python --quiet && exec dagster dev -m comext_pipeline --host 0.0.0.0 --port 3000"
+      /bin/sh -c "uv pip install --no-deps -e . --python /venv-dev/bin/python --quiet && cp dagster.yaml $$DAGSTER_HOME/dagster.yaml && exec dagster dev -m comext_pipeline --host 0.0.0.0 --port 3000"
 
 volumes:
   dagster_home_dev:
