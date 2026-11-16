@@ -2,7 +2,9 @@
 Dagster resource wrapping a DuckDB connection.
 
 Provides a managed connection with:
-- Automatic schema initialisation on first use
+- Automatic schema initialisation on first use, and a one-off migration of
+  databases created with the old indexed schema
+- A memory limit, so large upserts spill to disk instead of being OOM-killed
 - Context-manager usage for safe connection lifecycle
 - Retry with capped exponential backoff when another process holds the file lock
 - Helper for single-file Parquet upserts
@@ -18,7 +20,13 @@ import duckdb
 from dagster import ConfigurableResource, get_dagster_logger
 from pydantic import Field
 
-from comext_pipeline.utils.schema import DUCKDB_CREATE_TABLE_SQL, DUCKDB_UPSERT_SQL
+from comext_pipeline.utils.schema import (
+    DUCKDB_CREATE_TABLE_SQL,
+    DUCKDB_DUPLICATE_CHECK_SQL,
+    DUCKDB_HAS_INDEXES_SQL,
+    DUCKDB_MIGRATE_UNINDEXED_SQL,
+    DUCKDB_UPSERT_SQL,
+)
 
 logger = get_dagster_logger(__name__)
 
@@ -32,13 +40,17 @@ class DuckDBResource(ConfigurableResource):
     Manages a DuckDB database file used as the final output dataset.
 
     The database is created (with schema) on first access if it does not exist.
-    All writes use INSERT OR REPLACE semantics, ensuring idempotency.
+    Writes replace whole periods (DELETE + INSERT), ensuring idempotency.
     Connection retries with backoff handle concurrent-writer lock conflicts.
     """
 
     db_path: str = Field(
         default="./data/comext.duckdb",
         description="Path to the DuckDB database file.",
+    )
+    memory_limit: str = Field(
+        default="2GB",
+        description="DuckDB memory_limit; beyond it, queries spill to <db>.tmp on disk.",
     )
 
     def _ensure_dir(self) -> None:
@@ -50,7 +62,7 @@ class DuckDBResource(ConfigurableResource):
         last_exc = None
         for attempt in range(1, _MAX_LOCK_RETRIES + 1):
             try:
-                con = duckdb.connect(self.db_path)
+                con = duckdb.connect(self.db_path, config={"memory_limit": self.memory_limit})
                 return con
             except duckdb.IOException as exc:
                 if "lock" not in str(exc).lower():
@@ -81,8 +93,13 @@ class DuckDBResource(ConfigurableResource):
         """
         self._ensure_dir()
         con = self._connect_with_retry()
+        # One explicit transaction for everything done on this connection: in
+        # autocommit mode the upsert's DELETE and INSERT would commit separately,
+        # and a crash between them would lose the period.
+        con.begin()
         try:
             con.execute(DUCKDB_CREATE_TABLE_SQL)
+            self._drop_indexes(con)
             yield con
             con.commit()
         except Exception:
@@ -91,10 +108,21 @@ class DuckDBResource(ConfigurableResource):
         finally:
             con.close()
 
+    @staticmethod
+    def _drop_indexes(con: duckdb.DuckDBPyConnection) -> None:
+        """Rebuild trade_flows without its old primary key and indexes, once."""
+        row = con.execute(DUCKDB_HAS_INDEXES_SQL).fetchone()
+        if row and row[0]:
+            logger.info("Migrating trade_flows to the unindexed schema (one-off)...")
+            con.execute(DUCKDB_MIGRATE_UNINDEXED_SQL)
+
     def upsert_parquet(self, path: str) -> int:
         """
-        Load a single Parquet file into the trade_flows table using
-        INSERT OR REPLACE semantics.
+        Load a single Parquet file into the trade_flows table, replacing every
+        period it contains.
+
+        Raises ValueError, before touching the table, if the file holds two
+        rows with the same trade-flow key.
 
         Returns the total row count in the table after the upsert.
         """
@@ -104,6 +132,13 @@ class DuckDBResource(ConfigurableResource):
         logger.info("Upserting %s into DuckDB...", path)
 
         with self.get_connection() as con:
+            duplicates = con.execute(
+                DUCKDB_DUPLICATE_CHECK_SQL.format(parquet_glob=safe_path)
+            ).fetchall()
+            if duplicates:
+                raise ValueError(
+                    f"{path} has duplicate trade-flow keys, refusing to load: {duplicates}"
+                )
             con.execute(sql)
             row = con.execute("SELECT COUNT(*) FROM trade_flows").fetchone()
             total = int(row[0]) if row else 0

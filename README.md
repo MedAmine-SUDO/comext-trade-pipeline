@@ -184,7 +184,7 @@ Eurostat API                          Local Disk                          DuckDB
     │                                      │                                │
     │                                      │  upsert_parquet(parquet)       │
     │                                      ├──────────────────────────────▶│  trade_flows
-    │                                      │                                │  INSERT OR REPLACE
+    │                                      │                                │  DELETE + INSERT  
 ```
 
 ### Revision Detection in Detail
@@ -639,7 +639,7 @@ Table: `trade_flows`
 | `source_file` | `VARCHAR` | NOT NULL | — | Origin filename for data lineage |
 | `ingested_at` | `TIMESTAMP` | NOT NULL | `current_timestamp` | When this record was loaded |
 
-Primary key: `(period, reporter_code, partner_code, flow, product_code, stat_procedure, supplementary_unit_code)`
+Unique key (enforced on every incoming file, not by a DuckDB index): `(period, reporter_code, partner_code, flow, product_code, stat_procedure, supplementary_unit_code)`. The table has no indexes on purpose: DuckDB keeps indexes in memory, and on ~5M rows a month they pushed a load past 4 GB. Queries filtered by period are served by DuckDB's per-row-group min/max statistics.
 
 Indexes: `period`, `reporter_code`, `partner_code`, `flow`, `product_code`
 
@@ -905,11 +905,12 @@ For a detailed reference on the COMEXT data format, column variations, country c
 | **Storage engine** | DuckDB | Columnar analytics engine, zero-config, single file, no server needed |
 | **Intermediate format** | Partitioned Parquet | One file per month → re-running one month only reprocesses that month |
 | **Upsert strategy** | `DELETE WHERE period=X` + `INSERT` | Simpler and faster than true upsert for partitioned data |
-| **Idempotency** | Partition-based + INSERT OR REPLACE | Re-running produces identical results; no duplicate rows |
+| **Idempotency** | Period replaced by `DELETE` + `INSERT` in one transaction | Re-running produces identical results; a crash mid-load leaves the previous version in place |
 | **Revision detection** | `Last-Modified` compared with what is loaded (`loaded.json`), not with the listing | Avoids re-downloading all 24 months on every tick, and a failed month is retried instead of being marked done |
 | **Format resilience** | Column-name alias resolution | Handles both v2 CSV and older pipe-delimited formats with different column names |
 | **Deployment** | Docker (multi-stage) | Identical behaviour on Windows/macOS/Linux; no host tooling needed |
-| **Schema enforcement** | Pydantic models + DuckDB DDL | Double validation: Python-side at parse time, database-side at write time |
+| **Schema enforcement** | Pydantic models + DuckDB DDL + a duplicate-key check per file | Validated at parse time; NOT NULL columns and key uniqueness checked again at write time |
+| **Memory** | No DuckDB indexes, `DUCKDB_MEMORY_LIMIT` (default 2GB) | Indexes can't spill to disk and grew past 4 GB; without them a month loads in ~4 s at under 1 GB |
 | **Error tolerance** | Configurable validation threshold | Can warn on errors (development) or fail (production) |
 | **Circuit breaker** | In-memory failure counter | Protects Eurostat API from aggressive retries when it's down |
 | **Concurrency control** | Dagster pools (`parse`, `duckdb`) limited to 1 in `dagster.yaml` | Downloads run in parallel, but only one month is parsed at a time (bounded memory) and DuckDB has a single writer (no lock contention) |

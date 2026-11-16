@@ -44,6 +44,7 @@ resources = {
     ),
     "duckdb_resource": DuckDBResource(
         db_path=_settings.comext_db_path,
+        memory_limit=_settings.duckdb_memory_limit,
     ),
 }
 

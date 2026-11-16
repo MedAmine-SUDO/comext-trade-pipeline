@@ -12,6 +12,22 @@ from comext_pipeline.resources.duckdb_resource import DuckDBResource
 
 from comext_pipeline.utils.schema import DUCKDB_CREATE_TABLE_SQL
 
+# The schema before the memory fix: a 7-column primary key and five indexes.
+OLD_INDEXED_SCHEMA_SQL = """
+CREATE TABLE trade_flows (
+    period VARCHAR NOT NULL, reporter_code VARCHAR NOT NULL, partner_code VARCHAR NOT NULL,
+    flow VARCHAR NOT NULL, product_code VARCHAR NOT NULL,
+    product_classification VARCHAR NOT NULL DEFAULT 'CN8', stat_procedure VARCHAR NOT NULL,
+    value_eur DOUBLE, value_nac DOUBLE, quantity_kg DOUBLE, supplementary_quantity DOUBLE,
+    supplementary_unit_code VARCHAR NOT NULL DEFAULT 'NO_SU', source_file VARCHAR NOT NULL,
+    ingested_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
+    PRIMARY KEY (period, reporter_code, partner_code, flow, product_code, stat_procedure,
+                 supplementary_unit_code)
+);
+CREATE INDEX idx_period ON trade_flows(period);
+CREATE INDEX idx_reporter ON trade_flows(reporter_code);
+"""
+
 
 @pytest.fixture
 def resource(tmp_path: Path) -> DuckDBResource:
@@ -83,12 +99,12 @@ class TestConnectionRetry:
         real_connect = duckdb.connect
         call_count = 0
 
-        def mock_connect(path):
+        def mock_connect(path, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count < 3:
                 raise duckdb.IOException("could not open: lock conflict")
-            return real_connect(path)
+            return real_connect(path, **kwargs)
 
         mocker.patch("duckdb.connect", side_effect=mock_connect)
 
@@ -218,3 +234,67 @@ class TestGetAvailablePeriods:
             df.write_parquet(p)
             resource.upsert_parquet(str(p))
         assert resource.get_available_periods() == ["202401", "202402", "202403"]
+
+
+class TestMemorySafety:
+    def test_memory_limit_is_applied(self, tmp_path: Path):
+        resource = DuckDBResource(db_path=str(tmp_path / "test.duckdb"), memory_limit="512MB")
+        with resource.get_connection() as con:
+            limit = con.execute("SELECT current_setting('memory_limit')").fetchone()
+        assert limit is not None
+        assert limit[0].startswith("488") or "512" in limit[0]  # DuckDB reports MiB
+
+    def test_new_table_has_no_indexes(self, resource: DuckDBResource):
+        with resource.get_connection() as con:
+            indexes = con.execute(
+                "SELECT COUNT(*) FROM duckdb_indexes() WHERE table_name = 'trade_flows'"
+            ).fetchone()
+            keys = con.execute(
+                "SELECT COUNT(*) FROM duckdb_constraints() "
+                "WHERE table_name = 'trade_flows' AND constraint_type = 'PRIMARY KEY'"
+            ).fetchone()
+        assert indexes == (0,)
+        assert keys == (0,)
+
+    def test_old_indexed_table_is_migrated_with_its_rows(self, tmp_path: Path):
+        import duckdb
+
+        db_path = str(tmp_path / "old.duckdb")
+        con = duckdb.connect(db_path)
+        con.execute(OLD_INDEXED_SCHEMA_SQL)
+        con.execute(
+            "INSERT INTO trade_flows (period, reporter_code, partner_code, flow, product_code, "
+            "stat_procedure, value_eur, source_file) "
+            "VALUES ('202401', 'FR', 'DE', 'IMPORT', '12345678', '1', 10.0, 'old.7z')"
+        )
+        con.close()
+
+        resource = DuckDBResource(db_path=db_path)
+        with resource.get_connection() as con:
+            rows = con.execute("SELECT period, value_eur FROM trade_flows").fetchall()
+            leftover = con.execute(
+                "SELECT COUNT(*) FROM duckdb_indexes() WHERE table_name = 'trade_flows'"
+            ).fetchone()
+            keys = con.execute(
+                "SELECT COUNT(*) FROM duckdb_constraints() "
+                "WHERE table_name = 'trade_flows' AND constraint_type = 'PRIMARY KEY'"
+            ).fetchone()
+        assert rows == [("202401", 10.0)]
+        assert leftover == (0,)
+        assert keys == (0,)
+
+    def test_duplicate_keys_are_rejected_before_loading(
+        self, resource: DuckDBResource, sample_parquet: Path, tmp_path: Path
+    ):
+        resource.upsert_parquet(str(sample_parquet))
+        doubled = pl.concat([pl.read_parquet(sample_parquet)] * 2)
+        bad = tmp_path / "doubled.parquet"
+        doubled.write_parquet(bad)
+
+        with pytest.raises(ValueError, match="duplicate trade-flow keys"):
+            resource.upsert_parquet(str(bad))
+
+        # The earlier load is untouched.
+        with resource.get_connection() as con:
+            count = con.execute("SELECT COUNT(*) FROM trade_flows").fetchone()
+        assert count == (2,)

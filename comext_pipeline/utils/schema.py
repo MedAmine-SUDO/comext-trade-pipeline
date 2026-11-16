@@ -28,6 +28,9 @@ class PipelineSettings(BaseSettings):
     comext_raw_dir: str = "./data/raw"
     comext_processed_dir: str = "./data/processed"
     comext_db_path: str = "./data/comext.duckdb"
+    duckdb_memory_limit: str = Field(
+        default="2GB", description="DuckDB memory_limit; larger queries spill to disk"
+    )
 
     # Dagster home
     dagster_home: str = Field(default="./.dagster", description="Dagster home directory")
@@ -155,8 +158,23 @@ class TradeFlowRecord(BaseModel):
 
 # ─── DuckDB DDL ─────────────────────────────────────────────────────────────────
 
-DUCKDB_CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS trade_flows (
+# No PRIMARY KEY or secondary indexes: DuckDB keeps index structures in memory
+# and cannot spill them, so on ~5M rows a month they grew past 4 GB after
+# ten months and the upsert was OOM-killed. Uniqueness is enforced instead by
+# the parser's dedup on TRADE_FLOW_KEY, checked again on every incoming file
+# (DUCKDB_DUPLICATE_CHECK_SQL); the upsert replaces whole periods, and per-period
+# scans are served by DuckDB's row-group min/max statistics.
+TRADE_FLOW_KEY = (
+    "period",
+    "reporter_code",
+    "partner_code",
+    "flow",
+    "product_code",
+    "stat_procedure",
+    "supplementary_unit_code",
+)
+
+_TRADE_FLOWS_COLUMNS = """
     period                    VARCHAR      NOT NULL,
     reporter_code             VARCHAR      NOT NULL,
     partner_code              VARCHAR      NOT NULL,
@@ -167,19 +185,39 @@ CREATE TABLE IF NOT EXISTS trade_flows (
     value_eur                 DOUBLE,
     value_nac                 DOUBLE,
     quantity_kg               DOUBLE,
-    supplementary_quantity  DOUBLE,
-    supplementary_unit_code VARCHAR      NOT NULL DEFAULT 'NO_SU',
+    supplementary_quantity    DOUBLE,
+    supplementary_unit_code   VARCHAR      NOT NULL DEFAULT 'NO_SU',
     source_file               VARCHAR      NOT NULL,
-    ingested_at               TIMESTAMP    NOT NULL DEFAULT current_timestamp,
+    ingested_at               TIMESTAMP    NOT NULL DEFAULT current_timestamp
+"""
 
-    PRIMARY KEY (period, reporter_code, partner_code, flow, product_code, stat_procedure, supplementary_unit_code)
-);
+DUCKDB_CREATE_TABLE_SQL = f"""
+CREATE TABLE IF NOT EXISTS trade_flows ({_TRADE_FLOWS_COLUMNS});
+"""
 
-CREATE INDEX IF NOT EXISTS idx_period ON trade_flows(period);
-CREATE INDEX IF NOT EXISTS idx_reporter ON trade_flows(reporter_code);
-CREATE INDEX IF NOT EXISTS idx_partner ON trade_flows(partner_code);
-CREATE INDEX IF NOT EXISTS idx_flow ON trade_flows(flow);
-CREATE INDEX IF NOT EXISTS idx_product ON trade_flows(product_code);
+# One-off migration for databases created with the old indexed schema: copy the
+# rows into an unindexed table (sorted by period, so row-group statistics prune
+# well) and swap it in. Runs inside the caller's transaction.
+DUCKDB_MIGRATE_UNINDEXED_SQL = f"""
+CREATE TABLE trade_flows_unindexed ({_TRADE_FLOWS_COLUMNS});
+INSERT INTO trade_flows_unindexed SELECT * FROM trade_flows ORDER BY period;
+DROP TABLE trade_flows;
+ALTER TABLE trade_flows_unindexed RENAME TO trade_flows;
+"""
+
+DUCKDB_HAS_INDEXES_SQL = """
+SELECT
+    (SELECT COUNT(*) FROM duckdb_indexes() WHERE table_name = 'trade_flows')
+  + (SELECT COUNT(*) FROM duckdb_constraints()
+     WHERE table_name = 'trade_flows' AND constraint_type IN ('PRIMARY KEY', 'UNIQUE'))
+"""
+
+DUCKDB_DUPLICATE_CHECK_SQL = f"""
+SELECT {", ".join(TRADE_FLOW_KEY)}, COUNT(*) AS n
+FROM read_parquet('{{parquet_glob}}')
+GROUP BY ALL
+HAVING COUNT(*) > 1
+LIMIT 5
 """
 
 DUCKDB_UPSERT_SQL = """

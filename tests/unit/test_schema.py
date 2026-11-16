@@ -144,7 +144,9 @@ class TestComextFileEntry:
 class TestDuckDBSQL:
     def test_create_table_sql_has_expected_structure(self):
         assert "CREATE TABLE IF NOT EXISTS trade_flows" in DUCKDB_CREATE_TABLE_SQL
-        assert "PRIMARY KEY" in DUCKDB_CREATE_TABLE_SQL
+        # Indexes are memory-resident in DuckDB; uniqueness is checked per file instead.
+        assert "PRIMARY KEY" not in DUCKDB_CREATE_TABLE_SQL
+        assert "CREATE INDEX" not in DUCKDB_CREATE_TABLE_SQL
         assert "period" in DUCKDB_CREATE_TABLE_SQL
         assert "reporter_code" in DUCKDB_CREATE_TABLE_SQL
         assert "value_nac" in DUCKDB_CREATE_TABLE_SQL

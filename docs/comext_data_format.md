@@ -90,7 +90,7 @@ Country codes follow the **Eurostat/ISO** scheme:
 Eurostat may revise recently published data. The pipeline handles this by:
 1. Detecting changed files via the `Last-Modified` HTTP header
 2. Maintaining a 24-month rolling revision window
-3. Using `INSERT OR REPLACE` in DuckDB — revised months overwrite older data
+3. Replacing whole periods in DuckDB (`DELETE` + `INSERT` in one transaction): revised months overwrite older data
 
 ## File Sizes
 
