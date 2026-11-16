@@ -106,19 +106,18 @@ def parse_comext_file(dat_path: Path, source_filename: str) -> pl.DataFrame:
 
     delimiter = _detect_delimiter(dat_path)
 
-    # Read with infer_schema_length=0 to keep everything as strings initially;
-    # we type-cast explicitly below to handle nulls safely.
-
-    raw: pl.DataFrame = pl.read_csv(
+    # Scan lazily with everything as strings; we type-cast explicitly below to
+    # handle nulls safely. Only the columns we keep are ever materialised.
+    raw = pl.scan_csv(
         dat_path,
         separator=delimiter,
-        infer_schema_length=0,
+        infer_schema=False,
         ignore_errors=True,
         truncate_ragged_lines=True,
     )
     # Strip whitespace from column names (some vintages have trailing spaces)
-    raw = raw.rename({c: c.strip() for c in raw.columns})
-    cols = raw.columns
+    raw = raw.rename({c: c.strip() for c in raw.collect_schema().names()})
+    cols = raw.collect_schema().names()
     logger.debug("Delimiter: %s  Source columns: %s", repr(delimiter), cols)
 
     # ── Resolve required columns ───────────────────────────────────────────────
@@ -150,21 +149,14 @@ def parse_comext_file(dat_path: Path, source_filename: str) -> pl.DataFrame:
     select_exprs = [pl.col(src).alias(dest) for dest, src in col_map.items()]
     df = raw.select(select_exprs)
 
-    df = df.with_columns(
-        pl.col("period")
-        .map_elements(
-            lambda x: x if len(str(x)) == 6 and str(x).isdigit() else None, return_dtype=pl.Utf8
-        )
-        .alias("period")
-    )
-    df = df.drop_nulls(subset=["period"])
+    df = df.filter(pl.col("period").str.contains(r"^\d{6}$"))
 
     df = df.with_columns(pl.lit("CN8").alias("product_classification"))
 
     # ── Type casting ──────────────────────────────────────────────────────────
     numeric_cols = ["value_eur", "value_nac", "quantity_kg", "supplementary_quantity"]
     for col in numeric_cols:
-        if col in df.columns:
+        if col in df.collect_schema().names():
             df = df.with_columns(_parse_numeric(pl.col(col), delimiter).alias(col))
 
     # ── Normalise flow codes ───────────────────────────────────────────────────
@@ -179,16 +171,16 @@ def parse_comext_file(dat_path: Path, source_filename: str) -> pl.DataFrame:
     )
 
     # ── Ensure all key columns exist (fill missing with defaults) ────────────
-    if "supplementary_unit_code" not in df.columns:
+    if "supplementary_unit_code" not in df.collect_schema().names():
         df = df.with_columns(pl.lit("NO_SU").alias("supplementary_unit_code"))
 
-    if "supplementary_quantity" not in df.columns:
+    if "supplementary_quantity" not in df.collect_schema().names():
         df = df.with_columns(pl.lit(None).cast(pl.Float64).alias("supplementary_quantity"))
 
-    if "value_nac" not in df.columns:
+    if "value_nac" not in df.collect_schema().names():
         df = df.with_columns(pl.lit(None).cast(pl.Float64).alias("value_nac"))
 
-    if "quantity_kg" not in df.columns:
+    if "quantity_kg" not in df.collect_schema().names():
         df = df.with_columns(pl.lit(None).cast(pl.Float64).alias("quantity_kg"))
 
     # ── Add lineage column ────────────────────────────────────────────────────
@@ -208,14 +200,14 @@ def parse_comext_file(dat_path: Path, source_filename: str) -> pl.DataFrame:
     df = df.filter(pl.col("value_eur").is_not_null() & (pl.col("value_eur") >= 0))
 
     # ── Deduplicate (keep last in case of duplicate keys) ─────────────────────
-    df = df.unique(subset=key_cols, keep="last")
+    result = df.unique(subset=key_cols, keep="last").collect(engine="streaming")
 
     logger.info(
         "Parsed %s: %d records after cleaning",
         dat_path.name,
-        len(df),
+        len(result),
     )
-    return df
+    return result
 
 
 def validate_sample(df: pl.DataFrame, n: int = 100) -> list[str]:
