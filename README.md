@@ -217,6 +217,8 @@ Runs carry tags (`reason: new|revised`, `period`, `remote_last_modified`), so th
 
 A one-page [Streamlit](https://streamlit.io/) app (`dashboard/app.py`): exports and imports per month, the top 10 partners and product chapters, and a map of the trade balance with each partner. You can look at the EU27 or any single member state, and at extra-EU, intra-EU or all trade.
 
+<p align="center"><img src="docs/demo.gif" alt="Selecting Germany and all partners shows the incomplete intra-EU warning and the September drop, then the trade balance map with a tooltip on China" width="100%" /></p>
+
 ```bash
 uv run --group dashboard streamlit run dashboard/app.py    # http://localhost:8501
 ```
