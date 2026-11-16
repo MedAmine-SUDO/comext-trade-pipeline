@@ -1,945 +1,575 @@
-# COMEXT Trade Flow Pipeline
+<div align="center">
 
-[![CI](https://github.com/MedAmine-SUDO/comext-trade-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/MedAmine-SUDO/comext-trade-pipeline/actions/workflows/ci.yml)
+<img src="docs/logo.svg" alt="COMEXT pipeline logo" width="96" height="96" />
 
-A production-minded [Dagster](https://dagster.io/) pipeline that discovers, downloads, cleans, and maintains an up-to-date local copy of Eurostat's [COMEXT](https://ec.europa.eu/eurostat/web/international-trade/data/database) international trade data. It supports both full historical backfill and incremental updates with surgical revision detection.
+# COMEXT Trade Pipeline
 
-> **Note:** This is a personal portfolio project built to learn asset-based orchestration with Dagster. It's shared publicly for reference and discussion — see [LICENSE](./LICENSE.md) for reuse terms (CC BY-NC-ND: look and learn, please don't redistribute or repurpose commercially). If you'd like to build on it or use it commercially, feel free to reach out.
+### Every EU trade flow, month by month, kept up to date on its own.
 
----
+A production-minded [Dagster](https://dagster.io/) pipeline that downloads Eurostat's [COMEXT](https://ec.europa.eu/eurostat/web/international-trade/data/database) trade data,<br/>
+cleans ~5 million product-level rows a month into DuckDB, and picks up new and revised months by itself.
 
-## Dashboard: EU trade explorer
+<br/>
 
-![EU trade explorer](docs/dashboard.png)
+[![CI](https://img.shields.io/github/actions/workflow/status/MedAmine-SUDO/comext-trade-pipeline/ci.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/MedAmine-SUDO/comext-trade-pipeline/actions/workflows/ci.yml)
+&nbsp;
+[![License](https://img.shields.io/badge/license-CC_BY--NC--ND_4.0-111827?style=for-the-badge)](LICENSE.md)
 
-A one-page [Streamlit](https://streamlit.io/) app (`dashboard/app.py`) on top of the pipeline's output: EU exports and imports per month, top partners, top product chapters and a trade-balance map, for the EU as a whole or any single member state.
+![Python](https://img.shields.io/badge/Python-3.11_|_3.12-3776AB?logo=python&logoColor=white)
+![Dagster](https://img.shields.io/badge/Dagster-assets_·_sensors-4F43DD?logo=dagster&logoColor=white)
+![Polars](https://img.shields.io/badge/Polars-lazy_parsing-CD792C?logo=polars&logoColor=white)
+![DuckDB](https://img.shields.io/badge/DuckDB-storage-FFF000?logo=duckdb&logoColor=black)
+![Streamlit](https://img.shields.io/badge/Streamlit-dashboard-FF4B4B?logo=streamlit&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-dev_&_prod-2496ED?logo=docker&logoColor=white)
 
-```bash
-uv run --group dashboard streamlit run dashboard/app.py
+<br/>
+
+<img src="docs/dashboard.png" alt="EU trade explorer dashboard built on the pipeline's output" width="100%" />
+
+</div>
+
+<br/>
+
+## ✨ Why this project?
+
+Eurostat publishes one archive of EU trade per month: every member state, every partner country, every 8-digit product. Recent months run to hundreds of MB uncompressed. Then it **revises** past months, under the same filename, for up to two years.
+
+Keeping a correct local copy is harder than downloading it once:
+
+- 📦 **The files are big.** A recent month unpacks to ~400 MB and ~5M rows. Parsing it naively was killed for running out of memory on an 8 GB laptop.
+- 🔁 **Revisions are silent.** Same filename, new content. Unless you track versions, you keep the old numbers forever.
+- 💥 **Failures hide.** If "published" and "loaded" are tracked in the same place, a month that failed to load looks done and is never retried.
+
+This pipeline handles all three, and a [Streamlit dashboard](#-dashboard-eu-trade-explorer) shows what the data says.
+
+> **Note:** a personal portfolio project, built to learn asset-based orchestration with Dagster. It's public for reference and discussion; see [LICENSE](LICENSE.md) (CC BY-NC-ND: look and learn, please don't redistribute or repurpose commercially). Want to build on it? Reach out.
+
+<br/>
+
+## 🚀 Features
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 📡 Finds new and revised months by itself
+A sensor checks Eurostat every 30 minutes and compares each month's `Last-Modified` with the version **actually loaded**. New, revised and previously failed months get a run; unchanged months cost nothing.
+
+### 🧹 Parses big files in bounded memory
+Polars scans the raw file lazily: a 396 MB month is parsed in ~4 s at ~2.4 GB peak. It handles both the current CSV and the older pipe-delimited format, by column-name aliases.
+
+### 🗄️ Loads atomically, without indexes
+Each month is replaced with `DELETE` + `INSERT` in one transaction. With no DuckDB indexes and a memory cap, a month loads in ~4 s using under 1 GB, however big the table gets.
+
+</td>
+<td width="50%" valign="top">
+
+### 🛡️ Checked at every step
+Pydantic validates a sample of every month, duplicate keys are rejected before the table is touched, and 125 tests cover the parser, sensor, resources and an end-to-end run. CI runs ruff, mypy `--strict` and pytest on Python 3.11 and 3.12.
+
+### 🐳 Runs the same everywhere
+Multi-stage Docker image: a dev target with hot reload and debugpy, and a prod target running the Dagster webserver **and** daemon as a non-root user.
+
+### 📊 Comes with a dashboard
+A one-page Streamlit app on a ~1 MB extract of the data: exports, imports, top partners, product chapters and a trade-balance map.
+
+</td>
+</tr>
+</table>
+
+<br/>
+
+## 🏗️ Architecture
+
+```mermaid
+flowchart TB
+    API["🌍 <b>Eurostat bulk download API</b><br/><i>one full_v2_YYYYMM.7z per month</i>"]:::source
+
+    subgraph DAG["⚙️ Dagster · partitioned by month"]
+        direction LR
+        SEN(["📡 <b>sensor</b><br/><i>every 30 min</i>"]):::sensor
+        M["📋 <b>manifest</b><br/><i>what's published</i>"]:::asset
+        R["📦 <b>raw files</b><br/><i>download · extract</i>"]:::asset
+        P["🧹 <b>processed</b><br/><i>parse · clean · dedup</i>"]:::asset
+        D["🗄️ <b>dataset</b><br/><i>replace the month</i>"]:::asset
+        SEN --> M --> R --> P --> D
+    end
+
+    subgraph STORE["💾 Storage"]
+        direction LR
+        RAW[("raw/YYYYMM<br/>.7z · .dat")]:::store
+        PQ[("processed/<br/>YYYYMM.parquet")]:::store
+        DB[("comext.duckdb<br/><b>trade_flows</b>")]:::store
+    end
+
+    subgraph APP["📊 Dashboard"]
+        direction LR
+        EX["🧮 <b>extract</b><br/><i>~1 MB of aggregates</i>"]:::app
+        ST["📈 <b>Streamlit</b><br/><i>EU trade explorer</i>"]:::app
+        EX --> ST
+    end
+
+    API -. "listing + Last-Modified" .-> SEN
+    API == ".7z archives" ==> R
+    R --> RAW
+    P --> PQ
+    D --> DB
+    DB --> EX
+
+    classDef source fill:#1c5cab,stroke:#104281,color:#ffffff
+    classDef sensor fill:#eb6834,stroke:#c4501f,color:#ffffff
+    classDef asset fill:#2a78d6,stroke:#1c5cab,color:#ffffff
+    classDef store fill:#e8f1fc,stroke:#2a78d6,color:#0b0b0b
+    classDef app fill:#1baf7a,stroke:#12855c,color:#ffffff
+    style DAG fill:transparent,stroke:#2a78d6,stroke-width:1.5px,stroke-dasharray:6 4
+    style STORE fill:transparent,stroke:#898781,stroke-width:1.5px,stroke-dasharray:6 4
+    style APP fill:transparent,stroke:#1baf7a,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
-The app does not query the multi-GB DuckDB file. It reads a small aggregated extract committed in `dashboard/extract/` (monthly totals by partner and by CN chapter, about 1 MB), so it also runs on Streamlit Community Cloud with only `dashboard/requirements.txt`. To refresh the extract after a pipeline run:
+| Piece | Where | What it does |
+| --- | --- | --- |
+| 📡 `new_release_sensor` | `sensors/new_release_sensor.py` | Every 30 min: lists Eurostat, compares with `loaded.json`, queues one run per new / revised / failed month |
+| 📋 `comext_file_manifest` | `assets/manifest.py` | The current listing: `period → filename, url, size, last_modified` |
+| 📦 `raw_comext_files[month]` | `assets/raw_files.py` | Downloads the `.7z` (only if the version changed) and extracts the `.dat` |
+| 🧹 `processed_monthly_data[month]` | `assets/monthly_data.py` | Parses, cleans, deduplicates and validates; writes `YYYYMM.parquet` |
+| 🗄️ `comext_dataset[month]` | `assets/dataset.py` | Replaces the month in DuckDB, then records the loaded version |
+| 🔌 Resources | `resources/` | `EurostatClient` (retries + circuit breaker), `FileStoreResource` (archives, manifests), `DuckDBResource` (memory cap, transactions) |
+
+<details>
+<summary><b>Each asset, step by step</b></summary>
+<br/>
+
+**`comext_file_manifest`** (not partitioned) calls `EurostatClient.list_files()`, which reads the listing as JSON or falls back to HTML, keeps the `full_v2_*.7z` files and saves `manifest.json`. Annual totals (`YYYY52`) match no monthly partition, so they are never processed.
+
+**`raw_comext_files[month]`** looks the month up in the manifest. It reuses the archive on disk only if it is the version the manifest lists, because Eurostat publishes revisions under the same filename. Otherwise it streams a new download, extracts it with `py7zr` (falling back to the `7z` CLI) replacing any older extract, and records the version in `raw/YYYYMM/source.json`.
+
+**`processed_monthly_data[month]`** calls `parse_comext_file()`, which:
+- detects the delimiter (`,` or `|`) and resolves columns by alias (`PRODUCT_NC` → `product_code`),
+- parses European and US number formats, maps `FLOW` 1/2 to `IMPORT`/`EXPORT`, fills optional columns with defaults,
+- drops rows with null keys or a null/negative value, and deduplicates on the key,
+- validates a random sample of 200 rows with Pydantic (`MAX_VALIDATION_ERROR_RATIO` decides warn vs fail),
+- writes `processed/YYYYMM.parquet`.
+
+**`comext_dataset[month]`** opens DuckDB with a memory limit, rejects the file if two rows share a key, and replaces the month in one transaction (`DELETE` + `INSERT`). Only then does it write the version to `loaded.json`. If anything fails, the previous version of the month stays in place and the sensor retries it.
+
+</details>
+
+<br/>
+
+## 🔄 How a month flows through
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant S as 📡 Sensor
+    participant E as 🌍 Eurostat
+    participant A as ⚙️ Assets
+    participant F as 💾 Disk
+    participant D as 🗄️ DuckDB
+
+    S->>E: List monthly files + Last-Modified
+    S->>F: Read loaded.json (what DuckDB holds)
+    S-->>A: RunRequest per new, revised or failed month
+    A->>E: Download full_v2_YYYYMM.7z (only if the version changed)
+    A->>F: Extract .dat, record source.json
+    A->>F: Parse lazily with Polars → YYYYMM.parquet
+    A->>D: Reject the file if it has duplicate keys
+    A->>D: BEGIN · DELETE period · INSERT · COMMIT
+    A->>F: Record the loaded version in loaded.json
+```
+
+The key design choice: the pipeline keeps **two** records. `manifest.json` is what Eurostat publishes right now, refreshed on every run. `loaded.json` is what DuckDB actually holds, written only after a successful load. The sensor compares Eurostat against `loaded.json`, so a month that failed halfway is never mistaken for a loaded one.
+
+<details>
+<summary><b>The sensor's decision, for each month in the 24-month window</b></summary>
+<br/>
+
+```mermaid
+flowchart TD
+    T(["📡 Sensor tick · each month in the 24-month window"]):::sensor
+    T --> Q1{"Published by<br/>Eurostat?"}:::question
+    Q1 -- no --> S1["⏭️ skip<br/><i>not yet published</i>"]:::skip
+    Q1 -- yes --> Q2{"Run already<br/>queued or running?"}:::question
+    Q2 -- yes --> S2["⏭️ skip<br/><i>no duplicate runs</i>"]:::skip
+    Q2 -- no --> Q3{"In<br/>loaded.json?"}:::question
+    Q3 -- no --> R1["▶️ run · reason: new<br/><i>never loaded, or its last run failed</i>"]:::run
+    Q3 -- yes --> Q4{"Same<br/>Last-Modified?"}:::question
+    Q4 -- yes --> S3["✅ skip<br/><i>up to date</i>"]:::skip
+    Q4 -- no --> R2["▶️ run · reason: revised"]:::run
+
+    classDef sensor fill:#eb6834,stroke:#c4501f,color:#ffffff
+    classDef question fill:#e8f1fc,stroke:#2a78d6,color:#0b0b0b
+    classDef run fill:#2a78d6,stroke:#1c5cab,color:#ffffff
+    classDef skip fill:#f0efec,stroke:#c3c2b7,color:#52514e
+```
+
+Runs carry tags (`reason: new|revised`, `period`, `remote_last_modified`), so the Dagster UI shows why each one started. When nothing changed, the sensor returns a `SkipReason` with counts ("N up to date, M not yet published").
+
+</details>
+
+<br/>
+
+## 📊 Dashboard: EU trade explorer
+
+A one-page [Streamlit](https://streamlit.io/) app (`dashboard/app.py`): exports and imports per month, the top 10 partners and product chapters, and a map of the trade balance with each partner. You can look at the EU27 or any single member state, and at extra-EU, intra-EU or all trade.
 
 ```bash
-uv run --group dashboard python scripts/build_dashboard_extract.py              # from DuckDB
+uv run --group dashboard streamlit run dashboard/app.py    # http://localhost:8501
+```
+
+It doesn't query the multi-GB database. It reads a ~1 MB extract committed in `dashboard/extract/` (monthly totals by partner and by CN chapter), so it also runs on Streamlit Community Cloud with only `dashboard/requirements.txt`. Refresh it after a pipeline run:
+
+```bash
+uv run --group dashboard python scripts/build_dashboard_extract.py                 # from DuckDB
 uv run --group dashboard python scripts/build_dashboard_extract.py --from-parquet  # while a run holds the DuckDB lock
 ```
 
-Two things the data taught the dashboard:
+<details>
+<summary><b>Two things the data taught the dashboard</b></summary>
+<br/>
 
-- **Product rows include a `TOTAL` line per partner** that repeats the sum of the CN8 rows. The extract keeps CN8 rows only, otherwise every figure doubles.
-- **Intra-EU trade arrives late.** In the newest monthly file, all 27 member states have reported trade with the rest of the world, but only some have reported trade with each other. The dashboard defaults to extra-EU trade and warns when an intra-EU month is still incomplete.
+- **Each partner has a `TOTAL` product row** that repeats the sum of its CN8 rows. Summing every row doubles every figure, so the extract keeps CN8 rows only.
+- **Intra-EU trade arrives late.** In the newest monthly file, all 27 member states have reported trade with the rest of the world, but only 9 have reported trade with each other. Germany's exports looked half their real size until that came out. The dashboard defaults to extra-EU trade and warns when an intra-EU month is still incomplete.
 
----
+</details>
 
-## Table of Contents
+<br/>
 
-- [Dashboard: EU trade explorer](#dashboard-eu-trade-explorer)
-- [Overview & Architecture](#overview--architecture)
-- [Pipeline Walkthrough (End-to-End)](#pipeline-walkthrough-end-to-end)
-- [Project Structure](#project-structure)
-- [Prerequisites](#prerequisites)
-- [Quick Start (Docker — Recommended)](#quick-start-docker--recommended)
-- [Quick Start (Local, No Docker)](#quick-start-local-no-docker)
-- [Commands Reference](#commands-reference)
-- [Configuration](#configuration)
-- [Output Dataset](#output-dataset)
-- [Testing & Quality Checks](#testing--quality-checks)
-- [Debugging](#debugging)
-- [Data Format Reference](#data-format-reference)
-- [Design Decisions](#design-decisions)
-- [Troubleshooting](#troubleshooting)
+## 🐛 Bugs found by running it for real
 
----
+The unit tests passed. Loading real months on a laptop found these:
 
-## Overview & Architecture
+| What happened | Why | Fix |
+| --- | --- | --- |
+| A real month (396 MB, 4.8M rows) was **OOM-killed at 3.4 GB** while parsing | The whole file was read eagerly | Lazy Polars scan: **~4 s at ~2.4 GB** |
+| A failed month was **never retried**, and revised files **never re-downloaded** | The sensor compared Eurostat with `manifest.json`, which is refreshed even when a run fails; a fixed `run_key` blocked re-runs; same filename meant "already on disk" | Compare with `loaded.json` + per-month `source.json`; no `run_key`; in-flight check. Verified live: a failed July was retried on the next tick |
+| In production **the sensor never ran** | The prod image started only `dagster-webserver`, without the daemon that runs sensors | `scripts/entrypoint-prod.sh` runs both; `dagster.yaml` pool limits now apply |
+| A 12-month backfill was **OOM-killed at month 10** (4.35 GB) | DuckDB keeps indexes in memory and can't spill them; the table had a 7-column primary key + 5 indexes | No indexes, duplicate check per file, `DUCKDB_MEMORY_LIMIT`: **4.2 s at 0.94 GB**, file 9.0 → 6.0 GB |
+| A crash mid-load could **lose a month** | In autocommit mode the upsert's `DELETE` and `INSERT` committed separately | One explicit transaction per connection |
 
-### High-Level Architecture
+<br/>
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                              Dagster Definitions                             │
-│                                                                              │
-│  ┌──────────────────────┐           ┌──────────────────────────┐             │
-│  │  new_release_sensor  │           │  MONTHLY_PARTITIONS      │             │
-│  │  (polls Eurostat)    │──────────▶│  (2002-01-01 → today)    │             │
-│  └──────────┬───────────┘           └────────────┬─────────────┘             │
-│             │                                    │                            │
-│  ┌──────────▼────────────────────────────────────▼─────────────────────────┐ │
-│  │                              Assets                                     │ │
-│  │                                                                            │
-│  │  Asset 1: comext_file_manifest         (discovers all available files) │ │
-│  │              │                                                         │ │
-│  │              ▼                                                         │ │
-│  │  Asset 2: raw_comext_files[partition]  (downloads + extracts .7z)      │ │
-│  │              │                                                         │ │
-│  │              ▼                                                         │ │
-│  │  Asset 3: processed_monthly_data[partition]  (parses → Polars → Parquet) │ │
-│  │              │                                                         │ │
-│  │              ▼                                                         │ │
-│  │  Asset 4: comext_dataset[partition]    (upserts Parquet → DuckDB)      │ │
-│  └────────────────────────────────────────────────────────────────────────┘ │
-│                                                                              │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │  Resources                                                           │   │
-│  │  ├─ EurostatClient     →  httpx client with retry + circuit breaker  │   │
-│  │  ├─ FileStoreResource  →  local disk abstraction (archive/extract)   │   │
-│  │  └─ DuckDBResource     →  DuckDB connection + schema init + upsert   │   │
-│  └──────────────────────────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
+## 🏁 Get started
 
-### Component Breakdown
+<table>
+<tr>
+<td width="50%" valign="top">
 
-#### 1. Sensor: `new_release_sensor` (`sensors/new_release_sensor.py`)
-
-The pipeline's entry point. Runs every 30 minutes (configurable) and:
-
-1. Fetches the current Eurostat directory listing
-2. Filters to the last `REVISION_WINDOW_MONTHS` months (default: 24)
-3. For each month, compares the **remote Last-Modified header** against the **version actually loaded into DuckDB** (`loaded.json`)
-4. Yields a `RunRequest` for each new, revised or previously failed month that has no run in progress — unchanged months are **skipped entirely**
-5. Attaches tags (`reason: new|revised`, `period`, `remote_last_modified`) for observability
-
-This means:
-- Truly new months → always trigger a run
-- Revised months → trigger only if the source file actually changed
-- Failed months → retried on the next tick, because they never reached `loaded.json`
-- Unchanged months → zero compute, zero bandwidth
-
-#### 2. Partitions: `MONTHLY_PARTITIONS` (`partitions/monthly.py`)
-
-A `MonthlyPartitionsDefinition` spanning from `2002-01-01` to today. Helper functions (`partition_key_to_period`, `period_to_partition_key`, `latest_n_partition_keys`) convert between Dagster's `YYYY-MM-DD` keys and COMEXT's `YYYYMM` period strings.
-
-#### 3. Asset 1: `comext_file_manifest` (`assets/manifest.py`)
-
-The discovery step. Calls `EurostatClient.list_files()` to fetch the directory listing, builds a structured manifest dict (`period → {filename, url, size_bytes, last_modified}`), and persists it to disk via `FileStoreResource.save_manifest()`.
-
-This is a **non-partitioned** asset — it runs once per sensor tick, not once per month.
-
-#### 4. Asset 2: `raw_comext_files[partition]` (`assets/raw_files.py`)
-
-Partitioned by month. For a given period:
-1. Looks up the period in the persisted manifest
-2. Calls `EurostatClient.download_file()`: reuses the archive on disk only if it is the version the manifest lists (Eurostat publishes revisions under the same filename), otherwise downloads again
-3. Calls `FileStoreResource.extract_archive()` to decompress the `.7z` → `.dat`, replacing any older extract
-4. Updates the manifest and records the downloaded version in `<raw_dir>/<YYYYMM>/source.json`
-
-Output: one or more `.dat` files in `<raw_dir>/<YYYYMM>/`.
-
-#### 5. Asset 3: `processed_monthly_data[partition]` (`assets/monthly_data.py`)
-
-The transformation layer. For each partition:
-1. Finds `.dat` files in the raw period directory
-2. Calls `parse_comext_file()` — auto-detects delimiter (comma vs pipe), resolves columns by name alias, type-casts numeric fields, normalises flow codes, fills missing optional columns with defaults, deduplicates
-3. Runs Pydantic sample validation (configurable threshold)
-4. Writes a **sorted, deduplicated Parquet file** to `<processed_dir>/<YYYYMM>.parquet`
-
-Output: one Parquet file per month.
-
-#### 6. Asset 4: `comext_dataset[partition]` (`assets/dataset.py`)
-
-The loading step. For each partition:
-1. Reads the processed Parquet file
-2. Calls `DuckDBResource.upsert_parquet()` which:
-   - Deletes all existing rows for that period
-   - Inserts the new rows from the Parquet file
-3. Returns metadata (total rows, periods loaded range)
-
-This is the **consumer-facing output** of the pipeline.
-
-#### 7. Resources
-
-| Resource | Module | Role |
-|---|---|---|
-| `EurostatClient` | `resources/eurostat_client.py` | HTTP client with exponential backoff, circuit breaker, JSON/HTML listing parsing, streaming downloads |
-| `FileStoreResource` | `resources/file_store.py` | Local filesystem abstraction: path helpers, `.7z` extraction (py7zr with `7z` CLI fallback), JSON manifest persistence, raw file retention purge |
-| `DuckDBResource` | `resources/duckdb_resource.py` | DuckDB connection management with lock-retry backoff, schema auto-init, single-file Parquet upsert |
-
-#### 8. Definitions Entry Point: `__init__.py`
-
-Collects all assets, resources, sensors, and jobs into a Dagster `Definitions` object. Instantiated via environment variables through `PipelineSettings` (Pydantic `BaseSettings` loaded from `.env`).
-
-### Data Flow Diagram
-
-```
-Eurostat API                          Local Disk                          DuckDB
-─────────────                         ──────────                          ──────
-    │                                      │                                │
-    │  HTTP GET /?sort=1&dir=comext/...    │                                │
-    ├─────────────────────────────────────▶│  list_files()                  │
-    │◀─────────────────────────────────────┘  (JSON or HTML)                │
-    │                                      │                                │
-    │                                      │  save_manifest(manifest)       │
-    │                                      ├──▶ data/raw/manifest.json      │
-    │                                      │                                │
-    │  HTTP GET /?sort=1&downfile=...      │  download_file(entry)          │
-    ├─────────────────────────────────────▶│                                │
-    │◀─────────────────── .7z stream ──────┼──▶ data/raw/YYYYMM/*.7z       │
-    │                                      │  extract_archive(archive)      │
-    │                                      ├──▶ data/raw/YYYYMM/*.dat      │
-    │                                      │                                │
-    │                                      │  parse_comext_file(.dat)       │
-    │                                      ├──▶ data/processed/YYYYMM.parq │
-    │                                      │                                │
-    │                                      │  upsert_parquet(parquet)       │
-    │                                      ├──────────────────────────────▶│  trade_flows
-    │                                      │                                │  DELETE + INSERT  
-```
-
-### Revision Detection in Detail
-
-The pipeline keeps two separate records:
-
-- **`manifest.json`**: what Eurostat publishes right now. It is refreshed on every run.
-- **`loaded.json`**: which version of each month is actually in DuckDB. `comext_dataset` writes it only after a successful load.
-
-On each tick, the sensor fetches the live listing and, for each period in the window:
-
-1. If Eurostat hasn't published it yet → skip (counted as "not yet published")
-2. If a run for it is already queued or running → skip (no duplicates)
-3. If `loaded.json` has the same `last_modified` as Eurostat → **skip** (up to date)
-4. If `loaded.json` has an older version → **queue a run** with tag `reason: revised`
-5. If it isn't in `loaded.json` at all (never loaded, or its last run failed) → **queue a run** with tag `reason: new`
-
-Comparing against `loaded.json` instead of the manifest matters: the manifest is refreshed even when a run fails afterwards, so it can't tell "published" from "loaded". This avoids blindly re-processing all 24 months on every tick, without ever losing a failed month.
-
----
-
-## Pipeline Walkthrough (End-to-End)
-
-Here is exactly what happens from the moment you start the pipeline:
-
-### Starting Fresh
-
-```bash
-# 1. Start the Dagster dev server
-make dev-d
-
-# 2. Open http://localhost:3000 → you see 4 assets in the "comext" group
-
-# 3. The sensor auto-starts. Within 30 seconds it:
-#    - Fetches the Eurostat directory listing
-#    - Compares against loaded.json (empty → all months are new)
-#    - Submits RunRequests for the last 24 months
-```
-
-### A Single Partition Run
-
-When you materialise partition `2024-01-01` (period `202401`), the following happens step-by-step:
-
-1. **`comext_file_manifest`** (if not already materialised): Fetches the listing, saves `manifest.json`
-2. **`raw_comext_files[2024-01-01]`**:
-   - Reads `manifest.json`, finds entry for `202401`
-   - Calls `EurostatClient.download_file(entry, dest_dir=data/raw/202401/)`
-   - If missing or stale (older Last-Modified): streams the `.7z` file to `data/raw/202401/full_v2_202401.7z`
-   - Calls `FileStoreResource.extract_archive(data/raw/202401/full_v2_202401.7z, data/raw/202401/)`
-   - Extracts → `data/raw/202401/full_v2_202401.dat`
-3. **`processed_monthly_data[2024-01-01]`**:
-   - Reads `data/raw/202401/full_v2_202401.dat`
-   - Auto-detects delimiter (`,` or `|`)
-   - Resolves columns by name alias (e.g. `PRODUCT_NC` → `product_code`)
-   - Strips whitespace, parses European/US number formats
-   - Normalises `FLOW` (1→IMPORT, 2→EXPORT)
-   - Fills missing optional columns with defaults
-   - Drops rows with null keys or null/negative value
-   - Deduplicates on key columns
-   - Validates a random sample (200 rows) with Pydantic
-   - Writes `data/processed/202401.parquet`
-4. **`comext_dataset[2024-01-01]`**:
-   - Reads `data/processed/202401.parquet`
-   - Connects to `data/comext.duckdb`
-   - Deletes all rows where `period = '202401'`
-   - Inserts all rows from the Parquet file
-   - Records `202401` and its source version in `data/raw/loaded.json`
-   - Returns total row count after insert
-
-### Incremental Update (Sensor Tick)
-
-The next sensor tick (30 min later):
-1. Fetches the same Eurostat listing
-2. For each of the last 24 months, compares Eurostat's `last_modified` with `loaded.json`
-3. If all match → yields `SkipReason("Nothing to run in the 24-month window: N up to date, ...")` — no runs
-4. If Eurostat published a revision (e.g. `202401` data was corrected) → yields `RunRequest(partition_key="2024-01-01", tags={"reason": "revised"})`
-5. If a new month appeared (e.g. now `202406` is available) → yields `RunRequest(partition_key="2024-06-01", tags={"reason": "new"})`
-
-### Backfill
-
-To populate the entire dataset from scratch:
-- Use the Dagster UI: select `comext_dataset` → **Materialize all**
-- Or use the CLI script: `python scripts/backfill.py --all`
-- Each month is processed independently and in parallel (Dagster manages the concurrency)
-
----
-
-## Project Structure
-
-```
-comext_pipeline/
-├── Dockerfile                         # Multi-stage build: base → builder → dev → prod
-├── docker-compose.yml                 # Production composition
-├── docker-compose.override.yml        # Dev overlay (live reload, debugpy, bind mounts)
-├── .env.example                       # Template — copy to .env
-├── .dockerignore
-├── .gitignore
-├── Makefile                           # Shortcuts for common operations
-├── pyproject.toml                     # Project metadata, deps, tool config
-├── uv.lock                            # Lockfile (uv)
-│
-├── comext_pipeline/                   # ← Python package
-│   ├── __init__.py                    #   Dagster Definitions entry point
-│   ├── assets/
-│   │   ├── manifest.py                #   comext_file_manifest
-│   │   ├── raw_files.py               #   raw_comext_files[partition]
-│   │   ├── monthly_data.py            #   processed_monthly_data[partition]
-│   │   └── dataset.py                 #   comext_dataset[partition]
-│   ├── resources/
-│   │   ├── eurostat_client.py         #   HTTP client (retry, circuit breaker, listing/download)
-│   │   ├── duckdb_resource.py         #   DuckDB connection & upsert
-│   │   └── file_store.py              #   Local file abstraction & manifest
-│   ├── sensors/
-│   │   └── new_release_sensor.py      #   Polling sensor for new/revised files
-│   ├── partitions/
-│   │   └── monthly.py                 #   MonthlyPartitionsDefinition + helpers
-│   └── utils/
-│       ├── schema.py                  #   Pydantic models, DDL, PipelineSettings
-│       └── parsing.py                 #   Raw COMEXT file parser (Polars)
-│
-├── scripts/
-│   ├── backfill.py                    # CLI helper for historical materialisation
-│   ├── build_dashboard_extract.py     # Aggregates DuckDB → dashboard/extract/
-│   └── entrypoint-prod.sh             # Prod container: webserver + daemon
-│
-├── dashboard/
-│   ├── app.py                         # Streamlit "EU trade explorer"
-│   ├── requirements.txt               # Streamlit Cloud dependencies (app only)
-│   └── extract/                       # Committed aggregates + code lists (~1 MB)
-├── .streamlit/config.toml             # Dashboard theme (light and dark)
-├── dagster.yaml                       # Instance settings: pool limits (parse, duckdb)
-│
-├── tests/
-│   ├── conftest.py                    # Shared fixtures (tmp dir, sample CSV/pipe data)
-│   ├── unit/
-│   │   ├── test_parsing.py            #   Parser tests (CSV, pipe, edge cases)
-│   │   ├── test_schema.py             #   Pydantic model validation tests
-│   │   ├── test_eurostat_client.py    #   HTTP client tests (mocked)
-│   │   ├── test_file_store.py         #   File store tests (extraction, manifest, load state)
-│   │   ├── test_duckdb_resource.py    #   DuckDB upsert tests
-│   │   ├── test_partitions.py         #   Partition key conversion tests
-│   │   └── test_sensor.py             #   Sensor: new, revised, failed, in-flight months
-│   └── integration/
-│       └── test_pipeline.py           #   End-to-end with mocked HTTP
-│
-└── docs/
-    ├── comext_data_format.md          # COMEXT data format reference
-    └── dashboard.png                  # Dashboard screenshot
-```
-
-### Root Configuration Files
-
-| File | Role | Key details |
-|---|---|---|
-| `Dockerfile` | Multi-stage image build | `base` (Python 3.11 + `p7zip-full`), `builder` (uv sync of deps), `dev` (+dev deps, source bind-mount), `prod` (source baked in, non-root user) |
-| `docker-compose.yml` | Production orchestration | Single `dagster` service, named volumes for data persistence, health check |
-| `docker-compose.override.yml` | Dev overlay (auto-merged) | `target: dev`, bind-mount source, debugpy port 5678, `dagster dev` hot-reload |
-| `dagster.yaml` | Dagster instance settings | Pool limits: one parse and one DuckDB write at a time; copied into `$DAGSTER_HOME` at start |
-| `pyproject.toml` | Project config | setuptools build, uv dev-deps, ruff/mypy/pytest configuration |
-| `Makefile` | Convenience wrappers | All `make` commands wrap `docker compose` |
-
----
-
-## Prerequisites
-
-### Docker Path (Recommended)
-
-| Requirement | Minimum version | Install guide |
-|---|---|---|
-| Docker Engine | 20.10+ | [docs.docker.com/get-docker](https://docs.docker.com/get-docker/) |
-| Docker Compose | v2 (`docker compose`) | Bundled with Docker Desktop; on Linux install the [Compose plugin](https://docs.docker.com/compose/install/linux/) |
-
-> **Windows**: Docker Desktop includes both Engine and Compose. No extra steps needed.
-> **Linux**: Ensure you have the Compose **v2** plugin. Run `docker compose version` to verify.
-
-### Local Path (No Docker)
-
-| Requirement | Minimum version | Notes |
-|---|---|---|
-| Python | 3.11+ | Check with `python --version` |
-| 7-Zip (`7z` CLI) | any recent | Required to extract Eurostat `.7z` archives; `apt install p7zip-full` on Debian/Ubuntu, `brew install p7zip` on macOS |
-
----
-
-## Quick Start (Docker — Recommended)
-
-Works identically on Windows, macOS, and Linux with no Python or 7-Zip setup required.
-
-### 1. Prepare Environment
+### 🐳 With Docker (recommended)
+No Python or 7-Zip needed. Works the same on Windows, macOS and Linux.
 
 ```bash
 cp .env.example .env
-# Edit .env if needed (defaults are fine for a first run)
+make dev-d          # or: docker compose up --build -d
 ```
 
-### 2. Build & Start
+Open **http://localhost:3000**: four assets in the `comext` group, and the sensor already running. Within ~30 s it queues the last 24 months.
+
+</td>
+<td width="50%" valign="top">
+
+### 🐍 Locally with uv
+Needs Python 3.11+, [uv](https://docs.astral.sh/uv/) and 7-Zip (`p7zip-full`).
 
 ```bash
-# First time — builds the Docker image (takes a few minutes)
-docker compose up --build -d
-# Or with Make: make dev-d
-```
-
-### 3. Open the UI
-
-Navigate to **http://localhost:3000**.
-
-You should see:
-- Four assets in the `comext` group: `comext_file_manifest`, `raw_comext_files`, `processed_monthly_data`, `comext_dataset`
-- The `new_release_sensor` listed under **Sensors** (auto-started)
-- The `monthly_comext_ingest` job listed under **Jobs**
-
-### 4. Trigger a Run
-
-#### Option A: Let the Sensor Do Its Thing
-
-Wait ~30 seconds for the sensor's first tick. It will:
-1. Fetch the Eurostat listing
-2. Detect 24 months of new files
-3. Submit 24 partition runs automatically
-
-Watch progress in the **Runs** tab.
-
-#### Option B: Manual Backfill (Faster)
-
-Navigate to **Assets → comext_dataset → Materialize all**.
-
-This queues runs for every month from 2002-01 to today, processing them in parallel (Dagster's default concurrency).
-
-#### Option C: Single Month (Testing)
-
-In the Dagster UI:
-- Go to **Assets → comext_dataset → Materialize**
-- Enter partition key: `2024-01-01`
-
-Or via CLI:
-```bash
-docker compose run --rm dagster dagster asset materialize -m comext_pipeline \
-  --select comext_dataset \
-  --partition 2024-01-01
-```
-
-### 5. Query the Results
-
-```bash
-docker compose run --rm dagster python -c "
-import duckdb
-con = duckdb.connect('/data/comext.duckdb')
-print(con.execute('SELECT COUNT(*) FROM trade_flows').fetchone())
-print(con.execute('SELECT period, COUNT(*) FROM trade_flows GROUP BY period ORDER BY period LIMIT 5').fetchall())
-"
-```
-
-### Port Conflict?
-
-If port 3000 is already in use (e.g. a local `dagster dev` is running):
-
-```bash
-DAGSTER_HOST_PORT=3001 docker compose up -d
-# Then open http://localhost:3001
-```
-
-### Stopping
-
-```bash
-docker compose down          # stops + removes containers (data preserved in volumes)
-docker compose down -v       # !! also removes volumes (deletes all data)
-```
-
----
-
-## Quick Start (Local, No Docker)
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/MedAmine-SUDO/comext-trade-pipeline.git
-cd comext-trade-pipeline
-
-# 2. Prepare environment
 cp .env.example .env
-
-# 3. Install the package and dev dependencies (uv creates .venv)
 uv sync
-
-# 4. Set up the Dagster home with the concurrency limits
 export DAGSTER_HOME="$PWD/.dagster"
 mkdir -p "$DAGSTER_HOME" && cp dagster.yaml "$DAGSTER_HOME/"
-
-# 5. Verify
-uv run dagster definitions validate -m comext_pipeline
-
-# 6. Run tests
-uv run pytest
-
-# 7. Start the Dagster dev server
-uv run dagster dev -m comext_pipeline --host 0.0.0.0 --port 3000
+uv run dagster dev -m comext_pipeline
 ```
 
-> Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/). `dagster.yaml` limits parsing and DuckDB writes to one month at a time, which keeps memory bounded: a recent month is about 400 MB uncompressed.
+`dagster.yaml` limits parsing and DuckDB writes to one month at a time, which keeps memory bounded.
 
----
+</td>
+</tr>
+</table>
 
-## Commands Reference
+<details>
+<summary><b>▶️ Other ways to run months</b></summary>
+<br/>
 
-### Docker Lifecycle
+- **One month from the UI:** Assets → `comext_dataset` → Materialize → partition `2024-01-01`.
+- **Everything since 2002:** Assets → `comext_dataset` → Materialize all.
+- **From the CLI:**
+  ```bash
+  dagster asset materialize -m comext_pipeline --select comext_dataset --partition 2024-01-01
+  ```
+- **Headless backfill script** (no run history in the UI, it uses an ephemeral Dagster instance):
+  ```bash
+  uv run python scripts/backfill.py --from 2025-10 --to 2026-09
+  uv run python scripts/backfill.py --dry-run --all
+  ```
 
-| Action | Makefile | Docker CLI | Notes |
-|---|---|---|---|
-| Build + start (foreground) | `make dev` | `docker compose up --build` | Logs visible in terminal |
-| Build + start (background) | `make dev-d` | `docker compose up --build -d` | Runs in background |
-| Start (skip rebuild) | `make start` | `docker compose start` | Containers must exist |
-| Stop (preserves state) | `make stop` | `docker compose stop` | Fast restart next time |
-| Restart | `make restart` | `docker compose restart` | Quick bounce |
-| Stop + remove containers | `make down` | `docker compose down` | Volumes preserved |
-| All data destruction | `make clean-volumes` | `docker compose down -v` | **Irreversible** |
-| Tail logs | `make logs` | `docker compose logs -f dagster` | Follow mode |
-| Container status | `make ps` | `docker compose ps` | |
-| Open shell | `make shell` | `docker compose run --rm dagster bash` | Interactive |
+Prefer the UI for big backfills: it tracks each partition and can resume after failures.
 
-### Running Tests & Quality
+</details>
 
-| Action | Makefile | Direct (local) |
-|---|---|---|
-| Run all tests | `make test` | `pytest` |
-| Tests with coverage | `make test-cov` | `pytest --cov=comext_pipeline --cov-report=term-missing` |
-| Format code | `make fmt` | `ruff format comext_pipeline` |
-| Lint check | `make lint` | `ruff check comext_pipeline` |
-| Type check | `make typecheck` | `mypy comext_pipeline` |
-| Full suite | `make fmt lint typecheck test` | Run all four sequentially |
+<details>
+<summary><b>🔍 Query the result</b></summary>
+<br/>
 
-### Dagster Operations
+```python
+import duckdb
 
-```bash
-# Validate definitions (no server needed)
-dagster definitions validate -m comext_pipeline
+con = duckdb.connect("data/comext.duckdb", read_only=True)
 
-# Start dev server (local)
-dagster dev -m comext_pipeline --host 0.0.0.0
+# Loaded months
+con.sql("SELECT period, COUNT(*) AS rows FROM trade_flows GROUP BY period ORDER BY period")
 
-# Preview sensor without running it
-dagster sensor preview new_release_sensor -m comext_pipeline
+# EU exports to the rest of the world, per month (CN8 rows only: skip the TOTAL rows)
+con.sql("""
+    SELECT period, ROUND(SUM(value_eur) / 1e9, 1) AS exports_bn_eur
+    FROM trade_flows
+    WHERE flow = 'EXPORT' AND product_code <> 'TOTAL'
+      AND partner_code NOT IN ('AT','BE','BG','CY','CZ','DE','DK','EE','ES','FI','FR','GR','HR','HU',
+                               'IE','IT','LT','LU','LV','MT','NL','PL','PT','RO','SE','SI','SK')
+    GROUP BY period ORDER BY period
+""")
 
-# Start sensor manually (auto-started in dev mode)
-dagster sensor start new_release_sensor -m comext_pipeline
-
-# Materialise a single partition via CLI
-dagster asset materialize -m comext_pipeline \
-  --select comext_dataset \
-  --partition 2024-01-01
-
-# Materialise all partitions
-dagster asset materialize -m comext_pipeline --select comext_dataset
+# Germany's imports from China, per month
+con.sql("""
+    SELECT period, ROUND(SUM(value_eur) / 1e9, 2) AS imports_bn_eur
+    FROM trade_flows
+    WHERE reporter_code = 'DE' AND partner_code = 'CN' AND flow = 'IMPORT' AND product_code <> 'TOTAL'
+    GROUP BY period ORDER BY period
+""")
 ```
 
-### Backfill CLI Script
+With Docker: `docker compose run --rm dagster python -c "..."` and the path `/data/comext.duckdb`.
 
-The `scripts/backfill.py` helper is an **offline alternative** to the Dagster UI. It uses Dagster's Python API (`materialize_to_memory`) and does not persist run history.
+</details>
 
-```bash
-# Preview partitions without executing
-python scripts/backfill.py --dry-run --from 2002-01 --to 2024-01
-
-# Full historical backfill
-python scripts/backfill.py --all
-
-# Single month
-python scripts/backfill.py --month 2024-01
-
-# Range
-python scripts/backfill.py --from 2023-01 --to 2024-06
-
-# Using Docker
-docker compose run --rm dagster python scripts/backfill.py --all
-```
-
-> **Prefer the Dagster UI** for most backfills. The UI tracks run history, shows progress per partition, and allows resuming after failures. The script is a fallback for headless environments.
-
-### Production Mode
+<details>
+<summary><b>🚢 Production mode</b></summary>
+<br/>
 
 ```bash
-# Build and start the production image (no dev tools, non-root user)
-make prod
-# Or: docker compose -f docker-compose.yml up --build -d
-
-# View logs
+make prod          # or: docker compose -f docker-compose.yml up --build -d
 make prod-logs
-
-# Stop
 make prod-down
 ```
 
-Production runs `dagster-webserver` and `dagster-daemon` side by side (`scripts/entrypoint-prod.sh`) instead of `dagster dev`: no hot-reload, no dev tools, non-root user. The daemon is what runs the sensor and the run queue, so new and revised months keep arriving. If either process exits, the container exits and Docker's restart policy brings it back.
+The prod target runs `dagster-webserver` and `dagster-daemon` side by side (`scripts/entrypoint-prod.sh`) as a non-root user, with no hot reload or dev tools. The daemon runs the sensor and the run queue. If either process exits, the container exits and Docker's restart policy brings it back.
 
----
+Port 3000 taken? `DAGSTER_HOST_PORT=3001 docker compose up -d`.
 
-## Configuration
+</details>
 
-All configuration is managed via environment variables (sourced from `.env` by default):
+<br/>
 
-```bash
-cp .env.example .env
-```
+## ⚙️ Configuration
 
-| Variable | Default | Description |
-|---|---|---|
-| `COMEXT_DATA_DIR` | `./data` | Root directory for all local data |
-| `COMEXT_RAW_DIR` | `./data/raw` | Downloaded `.7z` / `.dat` files (subdirs by period) |
-| `COMEXT_PROCESSED_DIR` | `./data/processed` | Per-month Parquet files |
-| `COMEXT_DB_PATH` | `./data/comext.duckdb` | Final DuckDB dataset file |
-| `EUROSTAT_BASE_URL` | `https://ec.europa.eu/eurostat/api/dissemination/files/` | Eurostat bulk API root |
-| `EUROSTAT_REQUEST_DELAY` | `1.0` | Seconds between HTTP requests (be polite) |
-| `REVISION_WINDOW_MONTHS` | `24` | Rolling window for revision checks |
-| `SENSOR_MINIMUM_INTERVAL_SECONDS` | `1800` | Sensor polling interval (seconds) |
-| `RAW_RETENTION_MONTHS` | `0` | Delete raw files older than N months (0 = never) |
-| `MAX_VALIDATION_ERROR_RATIO` | `0.0` | Abort run if validation error ratio exceeds this (0 = warn only) |
-| `API_RETRY_MAX_ATTEMPTS` | `3` | Max HTTP retries for failed requests |
-| `API_CIRCUIT_BREAKER_THRESHOLD` | `5` | Consecutive failures before circuit opens |
-| `API_CIRCUIT_BREAKER_TIMEOUT` | `60.0` | Seconds before circuit breaker re-tries |
-| `DAGSTER_HOME` | `./.dagster` | Dagster run history, event log, schedule state |
-| `DAGSTER_HOST_PORT` | `3000` | Host port mapping for the Dagster UI (Docker only) |
+Everything is set by environment variables, read from `.env` (`cp .env.example .env`).
 
-### Docker-Specific Paths
+| Variable | Default | What it controls |
+| --- | --- | --- |
+| `COMEXT_DATA_DIR` · `COMEXT_RAW_DIR` · `COMEXT_PROCESSED_DIR` | `./data` · `./data/raw` · `./data/processed` | Where files go |
+| `COMEXT_DB_PATH` | `./data/comext.duckdb` | The output database |
+| `DUCKDB_MEMORY_LIMIT` | `2GB` | DuckDB's memory cap; bigger queries spill to disk |
+| `REVISION_WINDOW_MONTHS` | `24` | How far back the sensor checks for revisions |
+| `SENSOR_MINIMUM_INTERVAL_SECONDS` | `1800` | How often the sensor polls Eurostat |
+| `MAX_VALIDATION_ERROR_RATIO` | `0.0` | Share of invalid sampled rows that fails a run (0 = warn only) |
+| `RAW_RETENTION_MONTHS` | `0` | Delete raw files older than N months (0 = keep all) |
+| `EUROSTAT_BASE_URL` · `EUROSTAT_REQUEST_DELAY` | Eurostat API · `1.0` s | Source and politeness delay |
+| `API_RETRY_MAX_ATTEMPTS` · `API_CIRCUIT_BREAKER_THRESHOLD` · `API_CIRCUIT_BREAKER_TIMEOUT` | `3` · `5` · `60.0` s | HTTP resilience |
+| `DAGSTER_HOME` · `DAGSTER_HOST_PORT` | `./.dagster` · `3000` | Dagster state; UI port (Docker) |
 
-Inside the Docker container, the paths are:
-- `/data/raw` → mapped to `./data/raw` on the host (bind mount in dev)
-- `/data/processed` → mapped to `./data/processed`
-- `/data/comext.duckdb` → mapped to `./data/comext.duckdb`
-- `/app/.dagster` → stored in Docker volume `dagster_home_dev` (dev) or `dagster_home` (prod)
+In Docker, data lives under `/data` (bind-mounted to `./data` in dev) and Dagster state in the `dagster_home` volume.
 
----
+<br/>
 
-## Output Dataset
+## 🗄️ The output: `trade_flows`
 
-### DuckDB Schema
+One row per **month × reporter × partner × flow × CN8 product × statistical procedure × supplementary unit**.
 
-Table: `trade_flows`
+| Column | Type | Example | Notes |
+| --- | --- | --- | --- |
+| `period` | `VARCHAR` | `202609` | YYYYMM |
+| `reporter_code` | `VARCHAR` | `DE` | EU member state reporting the flow |
+| `partner_code` | `VARCHAR` | `CN` | ISO 3166 alpha-2, plus a few Eurostat-only codes (`XK`, `XS`, `Q…`) |
+| `flow` | `VARCHAR` | `EXPORT` | `IMPORT` or `EXPORT` |
+| `product_code` | `VARCHAR` | `84713000` | CN8; also `TOTAL` per partner, and `…XX` codes for confidential trade |
+| `product_classification` | `VARCHAR` | `CN8` | |
+| `stat_procedure` | `VARCHAR` | `1` | All procedures are kept (`1`, `2`, `3`, `9`) |
+| `value_eur` · `value_nac` | `DOUBLE` | `1342.0` | Value in euros / national currency |
+| `quantity_kg` · `supplementary_quantity` | `DOUBLE` | | Net mass; quantity in the supplementary unit |
+| `supplementary_unit_code` | `VARCHAR` | `NO_SU` | `PST`, `M2`, `L`… |
+| `source_file` · `ingested_at` | `VARCHAR` · `TIMESTAMP` | | Lineage |
 
-| Column | Type | Nullable | Default | Description |
-|---|---|---|---|---|
-| `period` | `VARCHAR` | NOT NULL | — | Year-month in YYYYMM format (e.g. `202401`) |
-| `reporter_code` | `VARCHAR` | NOT NULL | — | Reporting country code (e.g. `FR`, `DE`) |
-| `partner_code` | `VARCHAR` | NOT NULL | — | Partner country/area (e.g. `DE`, `WRL`) |
-| `flow` | `VARCHAR` | NOT NULL | — | `IMPORT` or `EXPORT` |
-| `product_code` | `VARCHAR` | NOT NULL | — | CN8/HS commodity code |
-| `product_classification` | `VARCHAR` | NOT NULL | `'CN8'` | Classification system (CN8, HS6, SITC, etc.) |
-| `stat_procedure` | `VARCHAR` | NOT NULL | — | Statistical procedure (1=standard trade, 4=simplified) |
-| `value_eur` | `DOUBLE` | YES | NULL | Trade value in Euros |
-| `value_nac` | `DOUBLE` | YES | NULL | Trade value in national currency |
-| `quantity_kg` | `DOUBLE` | YES | NULL | Net mass in kilograms |
-| `supplementary_quantity` | `DOUBLE` | YES | NULL | Supplementary unit quantity |
-| `supplementary_unit_code` | `VARCHAR` | NOT NULL | `'NO_SU'` | Supplementary unit code (PST, M2, LTR, NO_SU) |
-| `source_file` | `VARCHAR` | NOT NULL | — | Origin filename for data lineage |
-| `ingested_at` | `TIMESTAMP` | NOT NULL | `current_timestamp` | When this record was loaded |
+The key above is unique: the parser deduplicates on it, and each incoming file is checked again before loading. There is **no** DuckDB index on purpose; filters on `period` use DuckDB's per-row-group min/max statistics. See [`docs/comext_data_format.md`](docs/comext_data_format.md) for the raw format.
 
-Unique key (enforced on every incoming file, not by a DuckDB index): `(period, reporter_code, partner_code, flow, product_code, stat_procedure, supplementary_unit_code)`. The table has no indexes on purpose: DuckDB keeps indexes in memory, and on ~5M rows a month they pushed a load past 4 GB. Queries filtered by period are served by DuckDB's per-row-group min/max statistics.
+<br/>
 
-Indexes: `period`, `reporter_code`, `partner_code`, `flow`, `product_code`
-
-### Query Examples
-
-```python
-import duckdb
-
-# Connect
-con = duckdb.connect("data/comext.duckdb")
-
-# Total trade value by year
-con.execute("""
-    SELECT SUBSTRING(period, 1, 4) AS year,
-           flow,
-           ROUND(SUM(value_eur)) AS total_eur
-    FROM trade_flows
-    GROUP BY year, flow
-    ORDER BY year, flow
-""").fetchall()
-
-# Top 10 exporting countries (all time)
-con.execute("""
-    SELECT reporter_code,
-           ROUND(SUM(value_eur)) AS total_export_eur,
-           COUNT(DISTINCT period) AS months_active
-    FROM trade_flows
-    WHERE flow = 'EXPORT'
-    GROUP BY reporter_code
-    ORDER BY total_export_eur DESC
-    LIMIT 10
-""").fetchall()
-
-# Germany's imports from France (monthly)
-con.execute("""
-    SELECT period, ROUND(SUM(value_eur)) AS import_eur
-    FROM trade_flows
-    WHERE flow = 'IMPORT'
-      AND reporter_code = 'DE'
-      AND partner_code = 'FR'
-    GROUP BY period
-    ORDER BY period
-""").fetchall()
-
-# Check which periods are loaded
-con.execute("""
-    SELECT period, COUNT(*) AS rows, MIN(ingested_at) AS first_loaded
-    FROM trade_flows
-    GROUP BY period
-    ORDER BY period
-""").fetchall()
-
-# Total dataset size
-con.execute("""
-    SELECT COUNT(*) AS total_rows,
-           COUNT(DISTINCT period) AS months,
-           MIN(period) AS earliest,
-           MAX(period) AS latest
-    FROM trade_flows
-""").fetchall()
-```
-
----
-
-## Testing & Quality Checks
-
-### Test Structure
-
-```
-tests/
-├── conftest.py              # Shared fixtures: tmp dir, sample CSV/pipe data, mock responses
-├── unit/
-│   ├── test_parsing.py      # Parser: CSV, pipe-delimited, edge cases, missing columns
-│   ├── test_schema.py       # Pydantic: valid models, invalid data, field validators
-│   ├── test_eurostat_client.py  # HTTP: JSON/HTML listing, download, retry, circuit breaker
-│   ├── test_file_store.py   # File: manifest and load state, archive extraction, path helpers
-│   ├── test_duckdb_resource.py  # DuckDB: upsert, connect with lock retry, schema init
-│   ├── test_partitions.py   # Partitions: key conversion, latest_n, edge cases
-│   └── test_sensor.py       # Sensor: what is queued vs skipped, failed-run retry, no duplicates
-└── integration/
-    └── test_pipeline.py     # End-to-end: full asset materialisation with mocked HTTP
-```
-
-### Running Tests
+## 🧪 Testing & quality
 
 ```bash
-# All tests (107 total)
-make test
-# or: pytest
-
-# Unit tests only
-pytest tests/unit/ -v
-
-# Integration tests only
-pytest tests/integration/ -v
-
-# With coverage report
-make test-cov
-# or: pytest --cov=comext_pipeline --cov-report=term-missing
-
-# Specific test file
-pytest tests/unit/test_parsing.py -v
-
-# Specific test function
-pytest tests/unit/test_parsing.py::test_parse_v2_csv -v
+uv run pytest                        # 125 tests
+uv run ruff check comext_pipeline    # lint
+uv run mypy comext_pipeline          # strict type check
+make test                            # the same, inside Docker
 ```
 
-### Quality Gates
+| Suite | Covers |
+| --- | --- |
+| `test_parsing.py` | CSV and pipe formats, number formats, missing columns, edge cases |
+| `test_sensor.py` | What's queued vs skipped: new, revised, failed, in-flight months |
+| `test_eurostat_client.py` | JSON/HTML listings, downloads, retries, circuit breaker (mocked HTTP) |
+| `test_duckdb_resource.py` | Upserts, idempotency, lock retries, memory limit, migration, duplicate rejection |
+| `test_file_store.py` · `test_schema.py` · `test_partitions.py` | Archives and load state, Pydantic models, partition keys |
+| `integration/test_pipeline.py` | All four assets end to end, with mocked HTTP |
 
-```bash
-# Run all quality checks (must pass before committing)
-make fmt lint typecheck test
-```
+CI ([`ci.yml`](.github/workflows/ci.yml)) runs `uv sync --locked`, ruff, mypy and pytest on Python 3.11 and 3.12 on every push to `main` and every pull request.
 
-| Check | Tool | What it validates |
-|---|---|---|
-| Format | `ruff format` | Consistent code style (line length 100, PEP 8) |
-| Lint | `ruff check` | Bug-prone patterns, unused imports, type issues |
-| Type check | `mypy --strict` | Full static type safety across all 17 source files |
-| Tests | `pytest` | 107 tests covering all resources, parsing, schema, and pipeline |
+<br/>
 
-### Writing Tests
+## 🛠️ Debugging & troubleshooting
 
-Tests use:
-- `pytest` as the test runner
-- `unittest.mock` for mocking HTTP calls (no real network)
-- `pytest.fixture` for temporary directories and pre-configured resources
-- Sample data fixtures in `tests/conftest.py` (CSV, pipe-delimited, mock JSON, mock HTML)
+<details>
+<summary><b>🐞 Attach a debugger (VS Code)</b></summary>
+<br/>
 
-Conventions:
-- Unit tests go in `tests/unit/test_<module>.py`
-- Integration tests go in `tests/integration/`
-- Fixtures are shared via `tests/conftest.py`
-- Test functions are named `test_<function_name>_<scenario>`
-- Each test is independent (no shared state)
-
----
-
-## Debugging
-
-### Docker Debugging
-
-```bash
-# Open a shell inside the running container
-docker compose run --rm dagster bash
-
-# Inside the container:
-cd /app
-python -c "from comext_pipeline import defs; print(defs.assets)"
-python scripts/backfill.py --dry-run --from 2024-01 --to 2024-03
-
-# Check data files
-ls -la /data/raw/
-ls -la /data/processed/
-```
-
-### Debugpy (VS Code / DAP)
-
-The dev docker-compose override exposes port **5678** for debugpy. To attach a debugger:
-
-1. Add a breakpoint in your code: `breakpoint()` (or `import debugpy; debugpy.listen(5678)`)
-2. In VS Code, create a launch configuration (`.vscode/launch.json`):
+The dev container exposes debugpy on port **5678**. Add this to `.vscode/launch.json`, start with `make dev-d`, then **Run → Start Debugging**:
 
 ```json
 {
-    "version": "0.2.0",
-    "configurations": [
-        {
-            "name": "Attach to Dagster (debugpy)",
-            "type": "debugpy",
-            "request": "attach",
-            "connect": {
-                "host": "localhost",
-                "port": 5678
-            },
-            "pathMappings": [
-                {
-                    "localRoot": "${workspaceFolder}",
-                    "remoteRoot": "/app"
-                }
-            ]
-        }
-    ]
+  "version": "0.2.0",
+  "configurations": [{
+    "name": "Attach to Dagster (debugpy)",
+    "type": "debugpy",
+    "request": "attach",
+    "connect": { "host": "localhost", "port": 5678 },
+    "pathMappings": [{ "localRoot": "${workspaceFolder}", "remoteRoot": "/app" }]
+  }]
 }
 ```
 
-3. Start the dev container: `make dev-d`
-4. Trigger the code path you want to debug (e.g. materialise a partition)
-5. In VS Code: **Run → Start Debugging** (or F5), select "Attach to Dagster"
+</details>
 
-### Dagster UI Debugging
+<details>
+<summary><b>🔎 Where to look when something goes wrong</b></summary>
+<br/>
 
-- **Runs tab**: Inspect each run, its logs, and asset metadata
-- **Assets tab**: View materialisation history, partition status, and lineage
-- **Sensor tab**: View evaluation history and skip reasons
-- **Launchpad**: Manually trigger jobs with custom config
+- **A run failed:** Runs → the run → Logs. Each step logs what it read and wrote.
+- **The sensor queues nothing:** Sensors → `new_release_sensor` → evaluation history. The `SkipReason` says how many months are up to date or unpublished.
+- **The parser looks wrong:** run it on its own:
+  ```python
+  from pathlib import Path
+  from comext_pipeline.utils.parsing import parse_comext_file
+  df = parse_comext_file(Path("data/raw/202401/full_202401.dat"), source_filename="full_v2_202401.7z")
+  print(df.schema, df.height)
+  ```
+- **More logs:** `dagster dev -m comext_pipeline --log-level debug`.
 
-### Logging
+</details>
 
-The pipeline uses Dagster's `get_dagster_logger()` (which routes through `structlog`). Log levels:
-
-- `DEBUG`: Detailed column resolution, per-period sensor comparisons
-- `INFO`: High-level progress (files discovered, downloaded, parsed, upserted)
-- `WARNING`: Retries, circuit breaker state, validation errors below threshold
-- `ERROR`: Failed requests, failed parses, DuckDB lock conflicts
-
-To see debug logs:
-
-```bash
-# Set the log level in dagster.yaml or environment
-export DAGSTER_LOG_LEVEL=DEBUG
-docker compose run --rm dagster dagster dev -m comext_pipeline --log-level debug
-```
-
-### Common Debugging Scenarios
-
-**"My partition run failed — how do I find out why?"**
-1. Go to the **Runs** tab in the Dagster UI
-2. Click the failed run
-3. Look at the **Logs** tab — each step logs detailed information
-4. Check the **Event Log** for step-failure events
-
-**"The sensor is not triggering any runs"**
-1. Go to **Sensors → new_release_sensor**
-2. Click **View Evaluation History**
-3. Check the most recent evaluation — the `SkipReason` message will explain
-4. Common causes: all months unchanged, Eurostat API unreachable, or the sensor is paused
-
-**"The parser produced unexpected results"**
-1. Run the parser in isolation:
-```python
-from pathlib import Path
-from comext_pipeline.utils.parsing import parse_comext_file
-df = parse_comext_file(Path("data/raw/202401/full_v2_202401.dat"), source_filename="full_v2_202401.dat")
-print(df)
-print(df.dtypes)
-```
-2. Check the raw file columns: `head -1 data/raw/202401/full_v2_202401.dat`
-3. The parser auto-detects delimiter by counting `|` vs `,` in the header — verify this is correct
-
----
-
-## Data Format Reference
-
-For a detailed reference on the COMEXT data format, column variations, country codes, and file naming conventions, see [`docs/comext_data_format.md`](docs/comext_data_format.md).
-
-### Key Points
-
-- Files are named `full_v2_YYYYMM.7z` — one per month
-- Two formats: newer **CSV** (comma-separated) and older **pipe-delimited** (`|`)
-- Parser auto-detects the delimiter by counting occurrences in the header
-- Numeric formats differ: European (`.` as thousands separator, `,` as decimal) in pipe files; US format in CSV files
-- Pipeline filters to **standard trade** (`STAT_PROCEDURE = 1` / `STAT_REGIME = 4`)
-- Annual aggregate files (`full_v2_YYYY52.7z`) are excluded — the pipeline only processes monthly data
-- Country codes follow Eurostat/ISO scheme (`DE`, `FR`, `EU`, `WRL`)
-
----
-
-## Design Decisions
-
-| Concern | Approach | Rationale |
-|---|---|---|
-| **Storage engine** | DuckDB | Columnar analytics engine, zero-config, single file, no server needed |
-| **Intermediate format** | Partitioned Parquet | One file per month → re-running one month only reprocesses that month |
-| **Upsert strategy** | `DELETE WHERE period=X` + `INSERT` | Simpler and faster than true upsert for partitioned data |
-| **Idempotency** | Period replaced by `DELETE` + `INSERT` in one transaction | Re-running produces identical results; a crash mid-load leaves the previous version in place |
-| **Revision detection** | `Last-Modified` compared with what is loaded (`loaded.json`), not with the listing | Avoids re-downloading all 24 months on every tick, and a failed month is retried instead of being marked done |
-| **Format resilience** | Column-name alias resolution | Handles both v2 CSV and older pipe-delimited formats with different column names |
-| **Deployment** | Docker (multi-stage) | Identical behaviour on Windows/macOS/Linux; no host tooling needed |
-| **Schema enforcement** | Pydantic models + DuckDB DDL + a duplicate-key check per file | Validated at parse time; NOT NULL columns and key uniqueness checked again at write time |
-| **Memory** | No DuckDB indexes, `DUCKDB_MEMORY_LIMIT` (default 2GB) | Indexes can't spill to disk and grew past 4 GB; without them a month loads in ~4 s at under 1 GB |
-| **Error tolerance** | Configurable validation threshold | Can warn on errors (development) or fail (production) |
-| **Circuit breaker** | In-memory failure counter | Protects Eurostat API from aggressive retries when it's down |
-| **Concurrency control** | Dagster pools (`parse`, `duckdb`) limited to 1 in `dagster.yaml` | Downloads run in parallel, but only one month is parsed at a time (bounded memory) and DuckDB has a single writer (no lock contention) |
-
-### Why not...
-
-- **PostgreSQL / ClickHouse?** DuckDB provides the same analytical capabilities with zero operational overhead. For a single-user or team-scale dataset (tens of GB), it is the right fit. If the dataset grows beyond 100 GB or needs multi-user concurrent access, consider migrating to ClickHouse or DuckDB's MotherDuck.
-- **Apache Spark?** Unnecessary for this scale. Polars provides fast out-of-core processing for single-node workflows.
-- **dbt?** dbt focuses on SQL transformations. The pipeline includes significant extraction (HTTP download, archive extraction) and Python-based parsing logic that does not fit dbt's model.
-- **Airflow / Prefect?** Dagster was chosen for its asset-based approach (partitioned assets, sensors, auto-cataloging metadata) which maps naturally to this pipeline's structure.
-
----
-
-## Troubleshooting
+<details>
+<summary><b>🧯 Common problems</b></summary>
+<br/>
 
 | Symptom | Likely cause | Fix |
-|---|---|---|
-| `address already in use` on port 3000 | Local `dagster dev` or another service is running | `kill <PID>` or use `DAGSTER_HOST_PORT=3001 docker compose up -d` |
-| Sensor evaluation returns `SkipReason` immediately | All monitored months are up to date — no changes detected | Normal behaviour. Force a backfill with `--month` to test processing |
-| `docker compose` says container not running | Container exited or failed to start | Check logs: `make logs` or `docker compose logs` |
-| DuckDB `database is locked` | Another process is accessing the same `.duckdb` file | Only run one backfill at a time. Ensure `dagster dev` isn't also running |
-| `No module named 'comext_pipeline'` | Package not installed in editable mode | Run `pip install -e '.[dev]'` inside the container; on Docker, check the override `command` |
-| Build takes very long | First build downloads + compiles all Python deps | Normal for initial build. Subsequent builds use Docker cache |
-| `Permission denied` on data directories | Docker volume permissions mismatch | Rebuild: `docker compose build` or `chown` the volumes |
-| Parser failing with `Required columns not found` | Eurostat changed the file format or column names | Check the raw file header: `head -1 <dat_file>`. Update `_COLUMN_ALIASES` in `parsing.py` if needed |
-| `HTTP 429 Too Many Requests` from Eurostat | Requesting too fast | Increase `EUROSTAT_REQUEST_DELAY` in `.env` (default: 1.0s) |
-| Pipeline runs but 0 rows in DuckDB | All rows failed validation or were filtered out | Check asset metadata for `validation_errors` count. Lower `MAX_VALIDATION_ERROR_RATIO` to see warnings |
-| `py7zr` extraction fails for a specific archive | Corrupted download or unsupported compression method | System `7z` CLI is installed as a fallback. Check with `7z l <archive>.7z` |
-| No `.dat` files after extraction | Archive contained a different file structure | Check extracted files: `ls -la data/raw/<period>/` |
-| Docker build fails on `p7zip-full` installation | Network issues or apt repository unavailable | Ensure internet connectivity. If behind a proxy, configure Docker's proxy settings |
-| Sensor not triggering when expected | Sensor is paused or minimum interval hasn't elapsed | Check sensor status in UI. Default interval is 1800s (30 min) |
-| `dagster dev` crashes on startup | Port conflict or invalid definitions | Run `dagster definitions validate -m comext_pipeline` to check for errors |
+| --- | --- | --- |
+| `address already in use` on 3000 | Another `dagster dev` is running | Stop it, or `DAGSTER_HOST_PORT=3001` |
+| Sensor always skips | Every month in the window is up to date | Normal. Materialize a month by hand to test |
+| DuckDB `database is locked` | Another process has the file open | One writer at a time; stop other backfills or notebooks |
+| `Required columns not found` | Eurostat changed column names | `head -1` the `.dat` file and extend `_COLUMN_ALIASES` in `parsing.py` |
+| HTTP 429 from Eurostat | Requests too fast | Raise `EUROSTAT_REQUEST_DELAY` |
+| Container exits at start | Build or config error | `make logs` |
+| Load killed for memory | Limit too high for the machine | Lower `DUCKDB_MEMORY_LIMIT` |
+
+</details>
+
+<br/>
+
+## 🧭 Design decisions
+
+| Decision | Why |
+| --- | --- |
+| **Dagster assets, partitioned by month** | Each month is materialized, retried and revised on its own, with lineage and history in the UI |
+| **Compare Eurostat with what's *loaded*** | The listing changes even when a run fails; only `loaded.json` says what DuckDB really holds |
+| **Parquet between parsing and loading** | Re-loading a month doesn't re-parse it, and the dashboard extract can be built without the database |
+| **DuckDB, unindexed, with a memory cap** | Columnar, single file, no server. Indexes can't spill to disk and broke loads at ~10 months |
+| **Replace a whole month in one transaction** | Simpler than a row-level upsert, idempotent, and a crash leaves the old version |
+| **Pools: one parse, one DuckDB writer** | Downloads stay parallel; memory and write locks stay bounded |
+| **Circuit breaker + retries on HTTP** | Backs off when Eurostat is down instead of hammering it |
+
+<details>
+<summary><b>Why not…</b></summary>
+<br/>
+
+- **PostgreSQL or ClickHouse?** DuckDB gives the same analytics with zero operations at this scale (tens of GB). Past ~100 GB or with many concurrent users, ClickHouse or MotherDuck would make sense.
+- **Spark?** Unnecessary on one machine. Polars' lazy engine handles a month in seconds.
+- **dbt?** Most of the work here is extraction and Python parsing, which isn't dbt's model.
+- **Airflow or Prefect?** Dagster's partitioned assets and sensors map directly onto "one asset per month, re-run when it changes".
+
+</details>
+
+<br/>
+
+## 🧰 Tech stack
+
+| Layer | Technology |
+| --- | --- |
+| Orchestration | Dagster (assets, monthly partitions, sensor, concurrency pools) |
+| Processing | Polars (lazy scan), Pydantic v2 (validation, settings) |
+| Storage | Parquet (per month), DuckDB (`trade_flows`) |
+| Source | httpx with retries and a circuit breaker, py7zr / 7-Zip |
+| Dashboard | Streamlit, Plotly, pandas |
+| Tooling | uv, ruff, mypy `--strict`, pytest, GitHub Actions |
+| Runtime | Docker multi-stage (dev with debugpy and hot reload, prod webserver + daemon) |
+
+<details>
+<summary><b>Project structure</b></summary>
+<br/>
+
+```
+├── comext_pipeline/
+│   ├── __init__.py                # Dagster Definitions: assets, resources, sensor, job
+│   ├── assets/                    # manifest, raw_files, monthly_data, dataset
+│   ├── resources/                 # eurostat_client, file_store, duckdb_resource
+│   ├── sensors/new_release_sensor.py
+│   ├── partitions/monthly.py      # Monthly partitions since 2002 + key helpers
+│   └── utils/
+│       ├── parsing.py             # Lazy Polars parser for both COMEXT formats
+│       └── schema.py              # Settings, Pydantic models, DuckDB SQL
+├── dashboard/
+│   ├── app.py                     # Streamlit EU trade explorer
+│   ├── requirements.txt           # Streamlit Cloud dependencies (app only)
+│   └── extract/                   # Committed aggregates + code lists (~1 MB)
+├── scripts/
+│   ├── backfill.py                # Headless backfill
+│   ├── build_dashboard_extract.py # DuckDB / Parquet → dashboard/extract/
+│   └── entrypoint-prod.sh         # Prod: webserver + daemon
+├── tests/                         # 125 unit + integration tests
+├── docs/                          # Data format reference, screenshot, logo
+├── .streamlit/config.toml         # Dashboard theme (light and dark)
+├── dagster.yaml                   # Pool limits: parse = 1, duckdb = 1
+├── Dockerfile · docker-compose*.yml · Makefile
+└── pyproject.toml · uv.lock       # Deps; "dev" and "dashboard" groups
+```
+
+</details>
+
+<br/>
+
+## 🗺️ Roadmap
+
+- [x] Lazy parsing that fits a real month in memory
+- [x] Retry failed months and re-download revised ones
+- [x] Run the daemon in production
+- [x] Streamlit dashboard on a committed extract
+- [x] Load any number of months in bounded memory
+- [ ] Build the dashboard extract as a Dagster asset, refreshed after each load
+- [ ] Dagster asset checks for row counts and month-on-month totals
+- [ ] Full history since 2002 in the dashboard, with CN8 drill-down
+- [ ] Clear the `pl.count()` and `partitions_def` deprecation warnings
+
+<br/>
+
+<div align="center">
+
+Made with ☕ by [**MedAmine-SUDO**](https://github.com/MedAmine-SUDO)
+
+If this helped you understand Eurostat trade data or Dagster, consider giving it a ⭐
+
+</div>

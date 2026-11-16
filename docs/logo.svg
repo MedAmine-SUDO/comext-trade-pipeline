@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" role="img" aria-label="COMEXT pipeline logo">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3987e5"/>
+      <stop offset="1" stop-color="#184f95"/>
+    </linearGradient>
+  </defs>
+  <rect width="96" height="96" rx="22" fill="url(#bg)"/>
+  <!-- monthly bars -->
+  <rect x="20" y="52" width="10" height="24" rx="3" fill="#ffffff" opacity="0.55"/>
+  <rect x="35" y="42" width="10" height="34" rx="3" fill="#ffffff" opacity="0.7"/>
+  <rect x="50" y="34" width="10" height="42" rx="3" fill="#ffffff" opacity="0.85"/>
+  <rect x="65" y="24" width="10" height="52" rx="3" fill="#ffffff"/>
+  <!-- trade flow arrow -->
+  <path d="M18 40 C 34 22, 52 18, 70 16" fill="none" stroke="#eb6834" stroke-width="5" stroke-linecap="round"/>
+  <path d="M62 10 L 74 15 L 64 24" fill="none" stroke="#eb6834" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
